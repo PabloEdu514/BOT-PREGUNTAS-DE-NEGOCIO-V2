@@ -34,3 +34,8 @@ Thumbs.db
 # Environment variables
 .env
 a_env_vars.py
+
+
+
+# Ignorar secretos
+.streamlit/secrets.toml

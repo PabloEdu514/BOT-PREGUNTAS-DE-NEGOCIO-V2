@@ -8,9 +8,6 @@ import os
 st.set_page_config(page_title="BOT Socios | Análisis SQL", page_icon="🤖")
 st.title("🤖 BOT para contestar PREGUNTAS DE NEGOCIO de la tabla de socios")
 
-st.write("📝 **Te sugiero iniciar preguntándome:**")
-st.write("❓ ¿CUÁLES SON LOS NOMBRES DE LAS COLUMNAS DE LA TABLA SOCIOS?")
-
 st.write("")  # Línea en blanco
 
 st.write("💡 **Ejemplos de consultas útiles:**")
