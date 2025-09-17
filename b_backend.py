@@ -1,4 +1,5 @@
-import os 
+# b_backend.py
+import os
 import re
 import time
 import sqlite3
@@ -13,7 +14,9 @@ from langchain_openai import ChatOpenAI
 from langchain.chains import create_sql_query_chain
 from langchain_core.prompts import PromptTemplate
 
-# ✅ DESCARGA ROBUSTA DE LA BASE DE DATOS
+# =========================
+#  DESCARGA ROBUSTA DE LA BASE DE DATOS (igual que tu versión)
+# =========================
 @st.cache_data(ttl=3600)
 def download_database():
     db_path = "ecommerce.db"
@@ -122,7 +125,7 @@ def init_database():
 
 db = init_database()
 
-# 🔐 Configurar API KEY
+# 🔐 Configurar API KEY (igual que tu versión)
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 else:
@@ -132,6 +135,186 @@ else:
     except ImportError:
         st.warning("No se encontró la API Key de OpenAI.")
 
+# =========================
+#  UTILIDADES DE SEGURIDAD Y NORMALIZACIÓN
+# =========================
+def es_consulta_segura(sql):
+    sql = sql.strip().lower()
+    sql = re.sub(r'--.*?(\n|$)', '', sql)
+    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
+    if not sql.startswith("select"):
+        return False
+    peligrosas = ["insert", "update", "delete", "drop", "alter", "create", "truncate", "replace", "attach", "detach", "pragma", "exec", "execute"]
+    return not any(p in sql for p in peligrosas)
+
+def quitar_acentos(texto):
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', texto)
+        if unicodedata.category(c) != 'Mn'
+    )
+
+def corregir_sql_sucursal(sql):
+    patron = re.compile(r'"?SUCURSAL"?\s*=\s*\'([^\']+)\'', re.IGNORECASE)
+    return patron.sub(lambda m: f"UPPER(SUCURSAL) = '{quitar_acentos(m.group(1)).upper()}'", sql)
+
+def eliminar_limit_si_lista_sucursales(sql):
+    if re.search(r'select\s+distinct\s+"?sucursal"?\s+from', sql, re.IGNORECASE):
+        return re.sub(r'limit\s+\d+', '', sql, flags=re.IGNORECASE)
+    return sql
+
+def dejar_solo_un_statement(sql: str) -> str:
+    return sql.split(";")[0].strip()
+
+def actualizar_ultimo_socio(sql):
+    patron = re.compile(r'"?NUMERO SOCIO"?\s*=\s*(\d+)', re.IGNORECASE)
+    match = patron.search(sql)
+    if match:
+        st.session_state["ultimo_socio_consultado"] = int(match.group(1))
+
+def expandir_pregunta_con_memoria(pregunta):
+    if not st.session_state.get("ultimo_socio_consultado"):
+        return pregunta
+    numero = st.session_state["ultimo_socio_consultado"]
+    patrones = ["el primero", "el anterior", "este socio", "del primero", "del anterior"]
+    for p in patrones:
+        if p in pregunta.lower():
+            return f"{pregunta} (número de socio {numero})"
+    return pregunta
+
+# =========================
+#  WHITELIST DE TABLA Y COLUMNAS (NUEVO)
+# =========================
+@st.cache_data
+def get_schema_whitelist(db_path="ecommerce.db"):
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cols = cur.execute("PRAGMA table_info('socios')").fetchall()
+        conn.close()
+        allowed_table = "socios"
+        allowed_cols = [c[1] for c in cols]  # nombre de columna
+        return allowed_table, set(allowed_cols)
+    except Exception:
+        return "socios", set()
+
+ALLOWED_TABLE, ALLOWED_COLS = get_schema_whitelist("ecommerce.db")
+
+# Clasificador simple de alcance (NUEVO)
+OFFTOPIC_HINTS = {
+    "fuera_alcance": (
+        "Fuera de alcance: este bot consulta **solo la tabla `socios`**. "
+        "Si buscas créditos, colocaciones, transacciones u otros módulos, usa el bot correspondiente. "
+        "Campos disponibles (parcial): {cols}"
+    )
+}
+
+def es_en_alcance(pregunta: str) -> bool:
+    fuera = [
+        "colocacion","colocaciones","prestamo","préstamo","prestamos","préstamos",
+        "transaccion","transacción","transacciones","ticket","ivr","pos","tpv",
+        "pagos","pago","morosidad","flujo","interes","interés","spread","venta","ventas",
+        "facturas","inventario","producto","productos","orden","pedido","pedidos"
+    ]
+    if any(w in pregunta.lower() for w in fuera):
+        # Permite si aun así menciona explícitamente alguna columna de 'socios'
+        if not any(c.lower().replace("_"," ") in pregunta.lower() for c in ALLOWED_COLS):
+            return False
+    return True
+
+def valida_sql_whitelist(sql: str) -> bool:
+    low = sql.lower()
+    # Solo tabla socios
+    if " from " in low and " from socios" not in low:
+        return False
+    # Bloquea joins por si acaso (este bot es mono-tabla)
+    if " join " in low:
+        return False
+    return True
+
+# =========================
+#  EXTRAS PARA EL FRONT (chips y selects) (NUEVO)
+# =========================
+def get_campos_socios():
+    """Devuelve lista de columnas de la tabla socios."""
+    return sorted(list(ALLOWED_COLS))
+
+def get_distinct_values(colname: str, limit: int = 200):
+    """Devuelve valores distintos de una columna de socios (para selects)."""
+    if colname not in ALLOWED_COLS:
+        return []
+    try:
+        conn = sqlite3.connect("ecommerce.db")
+        cur = conn.cursor()
+        # Nota: comillas dobles por si el nombre tiene espacios
+        q = f'SELECT DISTINCT "{colname}" FROM socios WHERE "{colname}" IS NOT NULL LIMIT {int(limit)}'
+        rows = cur.execute(q).fetchall()
+        conn.close()
+        vals = [r[0] for r in rows if r[0] is not None]
+        # Convertir a str y quitar acentos si es sucursal para consistencia visual
+        if colname.lower() == "sucursal":
+            vals = sorted({quitar_acentos(str(v)).upper() for v in vals})
+        else:
+            vals = sorted({str(v) for v in vals})
+        return vals
+    except Exception:
+        return []
+
+# === NUEVO: mapas Región <-> Sucursal y utilidades ===
+def get_sucursal_region_map(normalizar=True):
+    """
+    Regresa una lista de tuplas (SUCURSAL, REGION) únicas.
+    Si normalizar=True, devuelve SUCURSAL sin acento y en UPPER (consistente con tu UPPER(SUCURSAL)).
+    """
+    try:
+        conn = sqlite3.connect("ecommerce.db")
+        cur = conn.cursor()
+        rows = cur.execute('SELECT DISTINCT "SUCURSAL", "REGION" FROM socios WHERE "SUCURSAL" IS NOT NULL AND "REGION" IS NOT NULL').fetchall()
+        conn.close()
+        if normalizar:
+            out = []
+            for suc, reg in rows:
+                suc_norm = quitar_acentos(str(suc)).upper()
+                reg_str = str(reg)
+                out.append((suc_norm, reg_str))
+            return sorted(set(out))
+        else:
+            return sorted(set((str(s), str(r)) for s, r in rows))
+    except Exception:
+        return []
+
+def get_regiones():
+    vals = get_distinct_values("REGION")
+    return vals
+
+def get_sucursales():
+    vals = get_distinct_values("SUCURSAL")
+    return vals
+
+def get_sucursales_por_region(region: str):
+    """
+    Devuelve sucursales NORMALIZADAS (UPPER sin acento) que pertenecen a la 'region' dada (texto tal cual aparece en DB).
+    """
+    pares = get_sucursal_region_map(normalizar=True)  # (SUCURSAL_NORMALIZADA, REGION)
+    return sorted({s for (s, r) in pares if str(r) == str(region)})
+
+def get_region_de_sucursal(sucursal_norm: str):
+    """
+    Dada una sucursal NORMALIZADA (UPPER sin acento), devuelve su región (o None).
+    """
+    pares = get_sucursal_region_map(normalizar=True)
+    for s, r in pares:
+        if s == sucursal_norm:
+            return r
+    return None
+
+def pertenece_sucursal_a_region(sucursal_norm: str, region: str) -> bool:
+    r = get_region_de_sucursal(sucursal_norm)
+    return (r is not None) and (str(r) == str(region))
+
+
+# =========================
+#  CADENA LLM / PROMPTS
+# =========================
 @st.cache_resource
 def init_chain():
     global db
@@ -143,22 +326,25 @@ def init_chain():
         llm = ChatOpenAI(model_name='gpt-4', temperature=0)
         query_chain = create_sql_query_chain(llm, db)
 
+        # Prompt de respuesta con recordatorio de alcance (NUEVO)
         answer_prompt = PromptTemplate.from_template(
-            """Base de datos con información de 41,000+ socios de una cooperativa financiera.
-Tabla principal: `socios`
+            """Eres un analista que responde SOLO con base en la tabla `socios`.
+Si la pregunta no se puede resolver con columnas de `socios`, responde en una línea:
+"Fuera de alcance: este bot solo consulta la tabla `socios` (campos disponibles)."
 
-Columnas principales:
-- `NUMERO SOCIO`, `FECHA INGRESO`, `FECHA NACIMIENTO`, `SUCURSAL`, `REGION`, `BC SCORE`, `ESTIMADOR INGRESOS`, etc.
+Reglas:
+- NO inventes columnas ni tablas.
+- Si la pregunta menciona sucursal, usa SIEMPRE: UPPER(SUCURSAL)='NOMBRE SIN ACENTO'.
+- Si no hay filtro de sucursal y el usuario pide algo sensible (agregados grandes), SUJERIR agregar sucursal o región.
 
-🔎 INSTRUCCIONES OBLIGATORIAS:
-- Siempre filtra por sucursal usando `UPPER(SUCURSAL) = 'MAYÚSCULAS SIN ACENTO'`.
-- Prohibido usar `SUCURSAL = 'Nombre'` o `LIKE`.
+Tabla: `socios`
+Columnas (parciales): {cols}
 
 Pregunta del usuario: {question}
 Consulta SQL generada: {query}
-Resultado SQL: {result}
+Resultado SQL (primeros registros para contexto): {result}
 
-Respuesta:"""
+Respuesta concisa orientada a negocio:"""
         )
 
         return query_chain, db, answer_prompt, llm
@@ -166,60 +352,20 @@ Respuesta:"""
         st.error(f"Error al inicializar la cadena: {str(e)}")
         return None, None, None, None
 
-def es_consulta_segura(sql):
-    sql = sql.strip().lower()
-    sql = re.sub(r'--.*?(\n|$)', '', sql)
-    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
-    if not sql.startswith("select"):
-        return False
-    peligrosas = ["insert", "update", "delete", "drop", "alter", "create", "truncate", "replace", "attach", "detach", "pragma", "exec", "execute"]
-    return not any(p in sql for p in peligrosas)
-
-# 🔧 Normalización de acentos
-def quitar_acentos(texto):
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', texto)
-        if unicodedata.category(c) != 'Mn'
-    )
-
-# 🔧 1. Forzar uso de UPPER(SUCURSAL) y quitar tildes
-def corregir_sql_sucursal(sql):
-    patron = re.compile(r'"?SUCURSAL"?\s*=\s*\'([^\']+)\'', re.IGNORECASE)
-    return patron.sub(lambda m: f"UPPER(SUCURSAL) = '{quitar_acentos(m.group(1)).upper()}'", sql)
-
-# 🔧 2. Eliminar LIMIT si es lista de sucursales
-def eliminar_limit_si_lista_sucursales(sql):
-    if re.search(r'select\s+distinct\s+"?sucursal"?\s+from', sql, re.IGNORECASE):
-        return re.sub(r'limit\s+\d+', '', sql, flags=re.IGNORECASE)
-    return sql
-
-# 🔧 3. Asegurar solo una instrucción SQL
-def dejar_solo_un_statement(sql: str) -> str:
-    return sql.split(";")[0].strip()
-
-# 🧠 4. Guardar último número de socio
-def actualizar_ultimo_socio(sql):
-    patron = re.compile(r'"?NUMERO SOCIO"?\s*=\s*(\d+)', re.IGNORECASE)
-    match = patron.search(sql)
-    if match:
-        st.session_state["ultimo_socio_consultado"] = int(match.group(1))
-
-# 🧠 5. Reemplazar "el primero", "anterior" o "este socio"
-def expandir_pregunta_con_memoria(pregunta):
-    if not st.session_state.get("ultimo_socio_consultado"):
-        return pregunta
-    numero = st.session_state["ultimo_socio_consultado"]
-    patrones = ["el primero", "el anterior", "este socio", "del primero", "del anterior"]
-    for p in patrones:
-        if p in pregunta.lower():
-            return f"{pregunta} (número de socio {numero})"
-    return pregunta
-
-# ✅ FLUJO PRINCIPAL
+# =========================
+#  FLUJO PRINCIPAL
+# =========================
 def consulta(pregunta_usuario):
     try:
         if "OPENAI_API_KEY" not in os.environ:
             return "❌ No se configuró la API Key.", None, None
+
+        # Chequeo de alcance (NUEVO)
+        if not es_en_alcance(pregunta_usuario):
+            hint = OFFTOPIC_HINTS["fuera_alcance"].format(
+                cols=", ".join(get_campos_socios()[:18]) + ("…" if len(ALLOWED_COLS) > 18 else "")
+            )
+            return hint, None, None
 
         query_chain, db_sql, prompt, llm = init_chain()
         if not query_chain or not db_sql:
@@ -237,6 +383,10 @@ def consulta(pregunta_usuario):
         if not es_consulta_segura(consulta_sql):
             return "❌ Consulta bloqueada por seguridad. Solo se permiten operaciones SELECT.", None, None
 
+        # Validación de whitelist (NUEVO)
+        if not valida_sql_whitelist(consulta_sql):
+            return "🔒 La consulta hace referencia a objetos fuera de la tabla `socios`.", None, None
+
         if "limit" not in consulta_sql.lower():
             consulta_sql += " LIMIT 1000"
 
@@ -250,12 +400,13 @@ def consulta(pregunta_usuario):
 
         actualizar_ultimo_socio(consulta_sql)
 
-        resultado = str(filas[:3]) + (" ..." if len(filas) > 3 else "")
+        resultado = str(filas[:10]) + (" ..." if len(filas) > 10 else "")
         with st.spinner("💬 Generando respuesta..."):
             respuesta = llm.invoke(prompt.format_prompt(
                 question=pregunta_usuario,
                 query=consulta_sql,
-                result=resultado
+                result=resultado,
+                cols=", ".join(get_campos_socios()[:25]) + ("…" if len(ALLOWED_COLS) > 25 else "")
             ).to_string())
 
         df = pd.DataFrame(filas, columns=columnas)
