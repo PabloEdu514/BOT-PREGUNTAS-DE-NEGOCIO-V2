@@ -202,7 +202,7 @@ ALLOWED_TABLE, ALLOWED_COLS = get_schema_whitelist("ecommerce.db")
 # Clasificador simple de alcance (NUEVO)
 OFFTOPIC_HINTS = {
     "fuera_alcance": (
-        "Fuera de alcance: este bot consulta **solo la tabla `socios`**. "
+        "Fuera de alcance: este bot consulta **solo la tabla socios**. "
         "Si buscas créditos, colocaciones, transacciones u otros módulos, usa el bot correspondiente. "
         "Campos disponibles (parcial): {cols}"
     )
@@ -330,7 +330,7 @@ def init_chain():
         answer_prompt = PromptTemplate.from_template(
             """Eres un analista que responde SOLO con base en la tabla `socios`.
 Si la pregunta no se puede resolver con columnas de `socios`, responde en una línea:
-"Fuera de alcance: este bot solo consulta la tabla `socios` (campos disponibles)."
+"Fuera de alcance: este bot solo consulta la tabla socios (campos disponibles)."
 
 Reglas:
 - NO inventes columnas ni tablas.

@@ -1,70 +1,151 @@
-# front_app.py (tu archivo de front; si el tuyo se llama distinto, reemplázalo ahí)
+# front_app.py (chips 15/pg, flechas instantáneas + expander full width)
 import time
 import streamlit as st
 import b_backend
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
-import os
 
 st.set_page_config(page_title="BOT Socios | Análisis SQL", page_icon="🤖", layout="wide")
 st.title("🤖 BOT para contestar PREGUNTAS DE NEGOCIO de la tabla de socios")
-
-st.write("")  # Línea en blanco
+st.write("")
 
 # =========================
-# Panel guía (NUEVO)
+# ESTILOS (chips y paginación sutil)
+# =========================
+st.markdown("""
+<style>
+.chip-wrap{ max-width:900px; margin:6px 0 0 0; }
+.chip-row{ display:flex; flex-wrap:wrap; gap:10px; }
+.chip{
+  display:inline-block; padding:8px 12px; border-radius:999px;
+  background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15);
+  font-size:13px; line-height:1; white-space:nowrap;
+}
+.chip:hover{ background:rgba(255,255,255,0.10); border-color:rgba(255,255,255,0.25); }
+
+/* barra inferior: info a la izquierda, flechas pegadas a la derecha */
+.pager-bar{ display:flex; align-items:center; gap:8px; margin-top:6px; }
+.pager-info{ font-size:12px; opacity:.75; }
+.pager-spacer{ flex:1; }
+
+/* Botones sutiles (ghost) */
+.stButton>button{
+  padding:6px 10px; border-radius:10px; border:1px solid rgba(255,255,255,0.15);
+  background:transparent; color:inherit;
+}
+.stButton>button:hover{ background:rgba(255,255,255,0.08); border-color:rgba(255,255,255,0.25); }
+.stButton>button:disabled{ opacity:.35; }
+
+/* expander full width (ya está fuera de columnas) */
+.full-expander { margin-top:8px; }
+</style>
+""", unsafe_allow_html=True)
+
+# =========================
+# FUNCIÓN: paginación sin rerun (fijo 15 por página)
+# =========================
+def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
+    """
+    Chips con paginación suave:
+      - Siempre 15 por página.
+      - Sin st.rerun() al navegar.
+      - Re-render de flechas con claves dinámicas para que el habilitado cambie al instante.
+    """
+    if not campos:
+        st.info("No pude leer columnas de `socios` aún.")
+        return
+
+    PAGE_SIZE = 15
+    pkey = f"{ss_key}_page"
+    if pkey not in st.session_state:
+        st.session_state[pkey] = 1
+
+    total = len(campos)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    st.session_state[pkey] = max(1, min(st.session_state[pkey], total_pages))
+    cur = st.session_state[pkey]
+
+    # Placeholders para poder re-renderizar en la misma ejecución
+    chips_ph = st.container()
+    bar_ph = st.empty()
+
+    # --- función que pinta la barra con un set de claves único por página ---
+    def draw_bar(cur_page: int):
+        with bar_ph.container():
+            left, right = st.columns([8, 2])
+            with left:
+                st.markdown(
+                    f'<div class="pager-bar"><span class="pager-info">'
+                    f'Mostrando {PAGE_SIZE} por página</span>'
+                    f'<span class="pager-spacer"></span>'
+                    f'<span class="pager-info">Página {cur_page} de {total_pages} · {total} campos</span></div>',
+                    unsafe_allow_html=True
+                )
+            with right:
+                cprev, cnext = st.columns([1, 1])
+                with cprev:
+                    prev_clicked_local = st.button("‹", key=f"{ss_key}_prev_{cur_page}",
+                                                   disabled=(cur_page <= 1))
+                with cnext:
+                    next_clicked_local = st.button("›", key=f"{ss_key}_next_{cur_page}",
+                                                   disabled=(cur_page >= total_pages))
+        return prev_clicked_local, next_clicked_local
+
+    # 1) Pintamos barra y leemos clics
+    prev_clicked, next_clicked = draw_bar(cur)
+
+    # 2) Actualizamos página en memoria
+    new_cur = cur
+    if prev_clicked:
+        new_cur = max(1, cur - 1)
+    if next_clicked:
+        new_cur = min(total_pages, cur + 1)
+
+    # 3) Si la página cambió, re-pintamos la barra con las NUEVAS claves para que
+    #    el estado habilitado/inhabilitado se actualice al instante sin rerun.
+    if new_cur != cur:
+        st.session_state[pkey] = new_cur
+        prev_clicked, next_clicked = draw_bar(new_cur)
+
+    # 4) Calculamos y pintamos chips
+    cur = st.session_state[pkey]
+    start, end = (cur - 1) * PAGE_SIZE, (cur - 1) * PAGE_SIZE + PAGE_SIZE
+    visibles = campos[start:end]
+
+    with chips_ph:
+        st.markdown('<div class="chip-wrap"><div class="chip-row">', unsafe_allow_html=True)
+        st.markdown("\n".join([f'<span class="chip">{c}</span>' for c in visibles]), unsafe_allow_html=True)
+        st.markdown('</div></div>', unsafe_allow_html=True)
+
+# =========================
+# Panel superior (campos + filtros)
 # =========================
 with st.container():
     col1, col2 = st.columns([2, 1])
+
     with col1:
         st.subheader("¿Sobre qué puedo preguntar?")
         st.caption("Este bot consulta **solo** la tabla `socios`. No responde colocaciones, transacciones, ni otros módulos.")
-
         campos = b_backend.get_campos_socios()
-        if campos:
-            # Render "chips" simples con markdown
-            chips = " ".join([f"`{c}`" for c in campos[:30]])
-            st.markdown(f"Campos: {chips}" + (" …" if len(campos) > 30 else ""))
-        else:
-            st.info("No pude leer columnas de `socios` aún.")
-
-        with st.expander("💡 Ver ejemplos listos"):
-            ejemplos = [
-                "💰 MUÉSTRAME LOS 5 NÚMEROS DE SOCIOS CON MAYOR SALDO EN DPFs",
-                "💳 ¿CUÁNTOS SOCIOS TIENEN TARJETA DE CRÉDITO EN LA REGIÓN ORIENTE?",
-                "📊 DAME LA SUMA DE SALDO DE AHORRO DE SOCIOS QUE ESTÁN EN CARTERA VENCIDA",
-                "🌎 AGRÚPAME LAS SUMAS DE RESPONSABILIDAD TOTAL DE LOS CRÉDITOS ACTIVOS POR REGIONES",
-                "⭐ ¿QUIÉN ES EL SOCIO QUE TIENE EL MAYOR BC SCORE?",
-                "🔍 ENCUENTRA 3 REGISTROS DE SOCIOS QUE PERTENEZCAN A SUCURSAL CENTRO QUE NO TENGAN TARJETA DE CRÉDITO Y QUE TENGAN SCORE MAYOR A 700; MUÉSTRAME EL RESULTADO CON LAS COLUMNAS NÚMERO DE SOCIO Y SCORE",
-            ]
-            for ej in ejemplos:
-                st.markdown(f"- {ej}")
+        render_campos_paginado_15(campos, ss_key="campos_socios")
 
     with col2:
         st.subheader("Filtros rápidos")
 
-        # ----------------------------
-        # BLOQUE MODIFICADO (dependientes y autocorrección)
-        # ----------------------------
+        regiones_all = b_backend.get_regiones()
+        sucursales_all = b_backend.get_sucursales()
+        _ = b_backend.get_sucursal_region_map()
 
-        # Catálogos (desde back; SUCURSAL viene normalizada UPPER sin acento)
-        regiones_all = b_backend.get_regiones()              # texto región tal cual en DB
-        sucursales_all = b_backend.get_sucursales()          # UPPER sin acentos
-        _ = b_backend.get_sucursal_region_map()              # precarga/valida mapa (no se usa directo aquí)
-
-        # Estado persistente
         if "sel_region" not in st.session_state:
             st.session_state.sel_region = "—"
         if "sel_sucursal" not in st.session_state:
             st.session_state.sel_sucursal = "—"
 
-        # Opciones dependientes: si hay región elegida, filtra sucursales; si no, todas
         if st.session_state.sel_region != "—":
             sucursales_opts = ["—"] + b_backend.get_sucursales_por_region(st.session_state.sel_region)
         else:
             sucursales_opts = ["—"] + sucursales_all
 
-        # Selects con índices estables
         st.selectbox(
             "REGION (opcional)",
             options=["—"] + regiones_all,
@@ -81,29 +162,38 @@ with st.container():
             key="sel_sucursal"
         )
 
-        # AUTOCORRECCIÓN 1:
-        # Si eligieron región y luego una sucursal que no pertenece, ajusta región a la correcta de la sucursal.
         if st.session_state.sel_sucursal != "—" and st.session_state.sel_region != "—":
             if not b_backend.pertenece_sucursal_a_region(st.session_state.sel_sucursal, st.session_state.sel_region):
                 region_correcta = b_backend.get_region_de_sucursal(st.session_state.sel_sucursal)
                 if region_correcta:
                     st.info(f"🛠️ Ajusté **REGION** a **{region_correcta}** porque la sucursal seleccionada pertenece ahí.")
                     st.session_state.sel_region = region_correcta
-                    st.rerun()
 
-        # AUTOCORRECCIÓN 2:
-        # Si cambian región y la sucursal ya no coincide, limpia sucursal.
         if st.session_state.sel_region != "—" and st.session_state.sel_sucursal != "—":
             if not b_backend.pertenece_sucursal_a_region(st.session_state.sel_sucursal, st.session_state.sel_region):
                 st.warning("La sucursal seleccionada no pertenece a esa región. Se limpiará para evitar resultados vacíos.")
                 st.session_state.sel_sucursal = "—"
-                st.rerun()
 
-        # Variables locales para usar más abajo (opcional, por legibilidad)
         sel_region = st.session_state.sel_region
         sel_sucursal = st.session_state.sel_sucursal
-
         auto_inyectar = st.checkbox("Agregar estos filtros a mi pregunta", value=False)
+
+# =========================
+# Expander de ejemplos: FUERA de columnas (full width)
+# =========================
+st.markdown('<div class="full-expander">', unsafe_allow_html=True)
+with st.expander("💡 Ver ejemplos listos", expanded=False):
+    ejemplos = [
+        "💰 MUÉSTRAME LOS 5 NÚMEROS DE SOCIOS CON MAYOR SALDO EN DPFs",
+        "💳 ¿CUÁNTOS SOCIOS TIENEN TARJETA DE CRÉDITO EN LA REGIÓN ORIENTE?",
+        "📊 DAME LA SUMA DE SALDO DE AHORRO DE SOCIOS QUE ESTÁN EN CARTERA VENCIDA",
+        "🌎 AGRÚPAME LAS SUMAS DE RESPONSABILIDAD TOTAL DE LOS CRÉDITOS ACTIVOS POR REGIONES",
+        "⭐ ¿QUIÉN ES EL SOCIO QUE TIENE EL MAYOR BC SCORE?",
+        "🔍 ENCUENTRA 3 REGISTROS DE SOCIOS QUE PERTENEZCAN A SUCURSAL CENTRO QUE NO TENGAN TARJETA DE CRÉDITO Y QUE TENGAN SCORE MAYOR A 700; MUÉSTRAME EL RESULTADO CON LAS COLUMNAS NÚMERO DE SOCIO Y SCORE",
+    ]
+    for ej in ejemplos:
+        st.markdown(f"- {ej}")
+st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================
 # Estado de la conversación
@@ -114,7 +204,6 @@ if "mensajes" not in st.session_state:
 if "rewriter_llm" not in st.session_state:
     st.session_state.rewriter_llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
 
-# Prompt del rewriter con guardas de alcance (NUEVO)
 REWRITE_PROMPT = PromptTemplate.from_template(
     """Eres un reescritor de preguntas para análisis SOLO de la tabla `socios`.
 - Si la pregunta está fuera de ese alcance, responde EXACTO: "FUERA_DE_ALCANCE".
@@ -158,7 +247,9 @@ def reescribir_pregunta_si_aplica(pregunta):
 def _altura_para_df(df_len, max_height=420):
     return min(max_height, 42 + (32 * max(df_len, 1)))
 
+# =========================
 # Render historial
+# =========================
 for i, m in enumerate(st.session_state.mensajes):
     with st.chat_message(m["role"]):
         st.write(m["content"])
@@ -170,34 +261,27 @@ for i, m in enumerate(st.session_state.mensajes):
                                f"resultado_{i}.csv", mime="text/csv",
                                key=f"dl_hist_{i}")
 
+# =========================
 # Input del usuario
+# =========================
 prompt = st.chat_input("¿En qué te puedo ayudar?")
 if prompt:
-    # Inyectar filtros si aplica (no rompe nada; solo agrega contexto en lenguaje natural)
     user_prompt = prompt
     if auto_inyectar:
         extras = []
-        if sel_region != "—":
-            extras.append(f"en la región {sel_region}")
-        if sel_sucursal != "—":
-            extras.append(f"en la sucursal {sel_sucursal}")
-        if extras:
-            user_prompt = f"{user_prompt} ({', '.join(extras)})"
+        if sel_region != "—": extras.append(f"en la región {sel_region}")
+        if sel_sucursal != "—": extras.append(f"en la sucursal {sel_sucursal}")
+        if extras: user_prompt = f"{user_prompt} ({', '.join(extras)})"
 
     st.session_state.mensajes.append({"role": "user", "content": user_prompt, "df": None})
     with st.chat_message("user"):
         st.write(user_prompt)
 
-    # Reescritura (puede responder FUERA_DE_ALCANCE)
     pregunta_final = reescribir_pregunta_si_aplica(user_prompt)
     if pregunta_final == "FUERA_DE_ALCANCE":
         with st.chat_message("assistant"):
-            st.warning("Fuera de alcance: este bot consulta SOLO la tabla `socios`. Revisa los campos disponibles arriba.")
-        st.session_state.mensajes.append({
-            "role": "assistant",
-            "content": "Fuera de alcance. Usa los campos de `socios`.",
-            "df": None
-        })
+            st.warning("Fuera de alcance: este bot consulta solo la tabla socios. Revisa los campos disponibles arriba.")
+        st.session_state.mensajes.append({"role": "assistant", "content": "Fuera de alcance. Usa los campos de socios.", "df": None})
     else:
         with st.chat_message("assistant"):
             with st.spinner("Pensando..."):
@@ -219,13 +303,11 @@ if prompt:
                                    f"resultado_{int(time.time())}.csv", mime="text/csv",
                                    key=f"dl_new_{int(time.time()*1000)}")
 
-        st.session_state.mensajes.append({
-            "role": "assistant",
-            "content": texto,
-            "df": df
-        })
+        st.session_state.mensajes.append({"role": "assistant", "content": texto, "df": df})
 
-# Botón reset
+# =========================
+# Reset
+# =========================
 if st.button("🧹 Nueva conversación"):
     st.session_state.mensajes = []
     st.rerun()
