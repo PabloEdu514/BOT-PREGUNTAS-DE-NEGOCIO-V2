@@ -6,7 +6,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
 st.set_page_config(page_title="BOT Socios | Análisis SQL", page_icon="🤖", layout="wide")
-st.title("🤖 BOT para contestar PREGUNTAS DE NEGOCIO de la tabla de socios")
+st.title("🤖 BOT PARA RESPONDER PREGUNTAS DE NEGOCIO SOBRE SOCIOS")
 st.write("")
 
 # =========================
@@ -185,7 +185,7 @@ st.markdown('<div class="full-expander">', unsafe_allow_html=True)
 with st.expander("💡 Ver ejemplos listos", expanded=False):
     ejemplos = [
         "💰 MUÉSTRAME LOS 5 NÚMEROS DE SOCIOS CON MAYOR SALDO EN DPFs",
-        "💳 ¿CUÁNTOS SOCIOS TIENEN TARJETA DE CRÉDITO EN LA REGIÓN ORIENTE?",
+        "💳 ¿CUÁNTOS SOCIOS TIENEN TARJETA DE CRÉDITO?",
         "📊 DAME LA SUMA DE SALDO DE AHORRO DE SOCIOS QUE ESTÁN EN CARTERA VENCIDA",
         "🌎 AGRÚPAME LAS SUMAS DE RESPONSABILIDAD TOTAL DE LOS CRÉDITOS ACTIVOS POR REGIONES",
         "⭐ ¿QUIÉN ES EL SOCIO QUE TIENE EL MAYOR BC SCORE?",
