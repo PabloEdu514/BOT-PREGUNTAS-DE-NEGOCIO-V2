@@ -14,9 +14,7 @@ from langchain_openai import ChatOpenAI
 from langchain.chains import create_sql_query_chain
 from langchain_core.prompts import PromptTemplate
 
-# =========================
-#  DESCARGA ROBUSTA DE LA BASE DE DATOS
-# =========================
+# Descarga de la base de datos desde Google Drive
 @st.cache_data(ttl=3600)
 def download_database():
     db_path = "ecommerce.db"
@@ -34,7 +32,7 @@ def download_database():
 
         progress_container = st.container()
         with progress_container:
-            st.info("🔄 Descargando base de datos... Esto puede tardar unos segundos.")
+            st.info("Descargando base de datos... Esto puede tardar unos segundos.")
             progress_bar = st.progress(10)
             status_text = st.empty()
 
@@ -43,7 +41,7 @@ def download_database():
                 output = gdown.download(url, db_path, quiet=True)
                 if output:
                     progress_bar.progress(100)
-                    status_text.text("✅ Base de datos descargada exitosamente!")
+                    status_text.text("Base de datos descargada exitosamente.")
                     time.sleep(1)
                     return db_path
                 else:
@@ -93,26 +91,27 @@ def download_database():
 
                                 os.rename(temp_path, db_path)
                                 progress_bar.progress(100)
-                                status_text.text("✅ Base de datos descargada y verificada!")
+                                status_text.text("Base de datos descargada y verificada.")
                                 time.sleep(1)
                                 return db_path
 
                             except sqlite3.DatabaseError:
                                 os.remove(temp_path)
-                                status_text.text("❌ Archivo descargado no válido (no es SQLite)")
+                                status_text.text("Archivo descargado no válido (no es SQLite).")
                                 continue
                     except:
                         continue
 
                 raise Exception("No se pudo descargar el archivo.")
     except Exception as e:
-        st.error(f"❌ Error al descargar base de datos: {str(e)}")
+        st.error(f"Error al descargar base de datos: {str(e)}")
         st.error("Verifica que el archivo sea público en Drive.")
         return None
     finally:
         if 'progress_container' in locals():
             progress_container.empty()
 
+# Inicialización de la base de datos
 @st.cache_resource
 def init_database():
     try:
@@ -125,7 +124,7 @@ def init_database():
 
 db = init_database()
 
-# 🔐 Configurar API KEY
+# Configuración de API KEY
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 else:
@@ -135,9 +134,7 @@ else:
     except ImportError:
         st.warning("No se encontró la API Key de OpenAI.")
 
-# =========================
-#  UTILIDADES DE SEGURIDAD Y NORMALIZACIÓN
-# =========================
+# Validaciones y utilidades de seguridad
 def es_consulta_segura(sql):
     sql = sql.strip().lower()
     sql = re.sub(r'--.*?(\n|$)', '', sql)
@@ -179,13 +176,9 @@ def expandir_pregunta_con_memoria(pregunta):
             return f"{pregunta} (número de socio {numero})"
     return pregunta
 
-# =========================
-#  GUARDAS DE SEGURIDAD EN LENGUAJE NATURAL (NUEVO)
-# =========================
 SECURITY_BLOCK_TEXT = (
-    "🚫 Acción bloqueada por seguridad: este bot **solo consulta** la base (operaciones SELECT). "
-    "No es posible borrar, modificar ni crear datos o estructuras "
-    "(INSERT/UPDATE/DELETE/ALTER/DROP/TRUNCATE/PRAGMA/ATTACH/DETACH...)."
+    "🚫 Acción bloqueada por seguridad: este bot solo consulta la base (operaciones SELECT). "
+    "No es posible borrar, modificar ni crear datos o estructuras."
 )
 
 PATS_DANGEROUS = [
@@ -199,16 +192,13 @@ PATS_DANGEROUS = [
 ]
 
 def detectar_bloqueo_texto_usuario(texto: str) -> str | None:
-    """Devuelve el mensaje de bloqueo si el texto del usuario sugiere una acción no permitida."""
     t = quitar_acentos((texto or "").lower())
     for pat in PATS_DANGEROUS:
         if re.search(pat, t):
             return SECURITY_BLOCK_TEXT
     return None
 
-# =========================
-#  WHITELIST DE TABLA Y COLUMNAS
-# =========================
+# Definición de tabla y columnas permitidas
 @st.cache_data
 def get_schema_whitelist(db_path="ecommerce.db"):
     try:
@@ -226,7 +216,7 @@ ALLOWED_TABLE, ALLOWED_COLS = get_schema_whitelist("ecommerce.db")
 
 OFFTOPIC_HINTS = {
     "fuera_alcance": (
-        "Fuera de alcance: este bot consulta **solo la tabla socios**. "
+        "Fuera de alcance: este bot consulta solo la tabla socios. "
         "Si buscas créditos, colocaciones, transacciones u otros módulos, usa el bot correspondiente. "
         "Campos disponibles (parcial): {cols}"
     )
@@ -252,9 +242,7 @@ def valida_sql_whitelist(sql: str) -> bool:
         return False
     return True
 
-# =========================
-#  EXTRAS PARA EL FRONT (chips y selects)
-# =========================
+# Filtros para la interfaz
 def get_campos_socios():
     return sorted(list(ALLOWED_COLS))
 
@@ -315,9 +303,7 @@ def pertenece_sucursal_a_region(sucursal_norm: str, region: str) -> bool:
     r = get_region_de_sucursal(sucursal_norm)
     return (r is not None) and (str(r) == str(region))
 
-# =========================
-#  CONTEXTO INSTITUCIÓN (desde TXT)
-# =========================
+# Contexto de institución
 INSTITUCION = {
     "nombre": (st.secrets.get("INSTITUCION_NOMBRE") or "Caja Morelia Valladolid"),
     "acronimo": (st.secrets.get("INSTITUCION_ACRONIMO") or "CMV"),
@@ -382,9 +368,7 @@ def responder_contexto_desde_txt(pregunta: str) -> str:
         extra = f" Actualmente contamos con {fmt(m['total_socios'])} socios, en {fmt(m['regiones'])} regiones y {fmt(m['sucursales'])} sucursales."
     return f"Estamos en {nombre} ({acr}), una {tipo}.{extra}"
 
-# =========================
-#  CADENA LLM / PROMPTS
-# =========================
+# Inicialización de la cadena LLM
 @st.cache_resource
 def init_chain():
     global db
@@ -397,16 +381,16 @@ def init_chain():
         query_chain = create_sql_query_chain(llm, db)
 
         answer_prompt = PromptTemplate.from_template(
-            """Eres un analista que responde SOLO con base en la tabla `socios`.
-Si la pregunta no se puede resolver con columnas de `socios`, responde en una línea:
-"Fuera de alcance: este bot solo consulta la tabla `socios` (campos disponibles)."
+            """Eres un analista que responde SOLO con base en la tabla socios.
+Si la pregunta no se puede resolver con columnas de socios, responde en una línea:
+"Fuera de alcance: este bot solo consulta la tabla socios (campos disponibles)."
 
 Reglas:
 - NO inventes columnas ni tablas.
 - Si la pregunta menciona sucursal, usa SIEMPRE: UPPER(SUCURSAL)='NOMBRE SIN ACENTO'.
-- Si no hay filtro de sucursal y el usuario pide algo sensible (agregados grandes), SUJERIR agregar sucursal o región.
+- Si no hay filtro de sucursal y el usuario pide algo sensible (agregados grandes), sugiere agregar sucursal o región.
 
-Tabla: `socios`
+Tabla: socios
 Columnas (parciales): {cols}
 
 Pregunta del usuario: {question}
@@ -421,15 +405,12 @@ Respuesta concisa orientada a negocio:"""
         st.error(f"Error al inicializar la cadena: {str(e)}")
         return None, None, None, None
 
-# =========================
-#  FLUJO PRINCIPAL
-# =========================
+# Ejecución de consultas SQL
 def consulta(pregunta_usuario):
     try:
         if "OPENAI_API_KEY" not in os.environ:
             return "❌ No se configuró la API Key.", None, None
 
-        # Chequeo de alcance
         if not es_en_alcance(pregunta_usuario):
             hint = OFFTOPIC_HINTS["fuera_alcance"].format(
                 cols=", ".join(get_campos_socios()[:18]) + ("…" if len(ALLOWED_COLS) > 18 else "")
@@ -442,25 +423,23 @@ def consulta(pregunta_usuario):
 
         pregunta_usuario = expandir_pregunta_con_memoria(pregunta_usuario)
 
-        with st.spinner("🔍 Generando consulta SQL..."):
+        with st.spinner("Generando consulta SQL..."):
             consulta_sql = query_chain.invoke({"question": pregunta_usuario})
 
         consulta_sql = corregir_sql_sucursal(consulta_sql)
         consulta_sql = eliminar_limit_si_lista_sucursales(consulta_sql)
         consulta_sql = dejar_solo_un_statement(consulta_sql)
 
-        # Seguridad SQL
         if not es_consulta_segura(consulta_sql):
             return SECURITY_BLOCK_TEXT, None, None
 
-        # Whitelist tabla única
         if not valida_sql_whitelist(consulta_sql):
             return "🔒 La consulta hace referencia a objetos fuera de la tabla socios.", None, None
 
         if "limit" not in consulta_sql.lower():
             consulta_sql += " LIMIT 1000"
 
-        with st.spinner("⚙️ Ejecutando consulta segura..."):
+        with st.spinner("Ejecutando consulta segura..."):
             conn = sqlite3.connect("ecommerce.db")
             cursor = conn.cursor()
             cursor.execute(consulta_sql)
@@ -471,7 +450,7 @@ def consulta(pregunta_usuario):
         actualizar_ultimo_socio(consulta_sql)
 
         resultado = str(filas[:10]) + (" ..." if len(filas) > 10 else "")
-        with st.spinner("💬 Generando respuesta..."):
+        with st.spinner("Generando respuesta..."):
             respuesta = llm.invoke(prompt.format_prompt(
                 question=pregunta_usuario,
                 query=consulta_sql,

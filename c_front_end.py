@@ -14,9 +14,7 @@ st.set_page_config(
 st.title("🤖 BOT PARA RESPONDER PREGUNTAS DE NEGOCIO SOBRE SOCIOS")
 st.write("")
 
-# =========================
-# ESTILOS
-# =========================
+# Estilos generales
 st.markdown("""
 <style>
 .chip-wrap{ max-width:900px; margin:6px 0 0 0; }
@@ -28,12 +26,10 @@ st.markdown("""
 }
 .chip:hover{ background:rgba(255,255,255,0.10); border-color:rgba(255,255,255,0.25); }
 
-/* barra inferior: info a la izquierda, flechas a la derecha */
 .pager-bar{ display:flex; align-items:center; gap:8px; margin-top:6px; }
 .pager-info{ font-size:12px; opacity:.75; }
 .pager-spacer{ flex:1; }
 
-/* Botones sutiles (ghost) */
 .stButton>button{
   padding:6px 10px; border-radius:10px; border:1px solid rgba(255,255,255,0.15);
   background:transparent; color:inherit;
@@ -41,17 +37,14 @@ st.markdown("""
 .stButton>button:hover{ background:rgba(255,255,255,0.08); border-color:rgba(255,255,255,0.25); }
 .stButton>button:disabled{ opacity:.35; }
 
-/* expander full width */
 .full-expander { margin-top:8px; }
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# FUNCIÓN: chips 15/pg con flechas instantáneas (sin rerun)
-# =========================
+# Render de campos paginados
 def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
     if not campos:
-        st.info("No pude leer columnas de `socios` aún.")
+        st.info("No pude leer columnas de socios aún.")
         return
 
     PAGE_SIZE = 18
@@ -109,9 +102,7 @@ def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
         st.markdown("\n".join([f'<span class="chip">{c}</span>' for c in visibles]), unsafe_allow_html=True)
         st.markdown('</div></div>', unsafe_allow_html=True)
 
-# =========================
-# Panel superior (campos + filtros)
-# =========================
+# Panel de campos y filtros
 with st.container():
     col1, col2 = st.columns([2, 1])
 
@@ -170,9 +161,7 @@ with st.container():
         sel_sucursal = st.session_state.sel_sucursal
         auto_inyectar = st.checkbox("Agregar estos filtros a mi pregunta", value=False)
 
-# =========================
-# Expander de ejemplos (full width)
-# =========================
+# Ejemplos de uso
 st.markdown('<div class="full-expander">', unsafe_allow_html=True)
 with st.expander("💡 Ver ejemplos listos", expanded=False):
     ejemplos = [
@@ -187,9 +176,7 @@ with st.expander("💡 Ver ejemplos listos", expanded=False):
         st.markdown(f"- {ej}")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# =========================
-# Estado de la conversación
-# =========================
+# Conversación
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 
@@ -197,7 +184,7 @@ if "rewriter_llm" not in st.session_state:
     st.session_state.rewriter_llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
 
 REWRITE_PROMPT = PromptTemplate.from_template(
-    """Eres un reescritor de preguntas para análisis SOLO de la tabla `socios`.
+    """Eres un reescritor de preguntas para análisis SOLO de la tabla socios.
 - Si la pregunta está fuera de ese alcance, responde EXACTO: "FUERA_DE_ALCANCE".
 - Si depende del historial, hazla autónoma.
 - No inventes columnas.
@@ -239,9 +226,7 @@ def reescribir_pregunta_si_aplica(pregunta):
 def _altura_para_df(df_len, max_height=420):
     return min(max_height, 42 + (32 * max(df_len, 1)))
 
-# =========================
 # Render historial
-# =========================
 for i, m in enumerate(st.session_state.mensajes):
     with st.chat_message(m["role"]):
         st.write(m["content"])
@@ -253,9 +238,7 @@ for i, m in enumerate(st.session_state.mensajes):
                                f"resultado_{i}.csv", mime="text/csv",
                                key=f"dl_hist_{i}")
 
-# =========================
-# Input del usuario (+ guardas)
-# =========================
+# Entrada de usuario
 prompt = st.chat_input("¿En qué te puedo ayudar?")
 if prompt:
     user_prompt = prompt
@@ -269,32 +252,28 @@ if prompt:
     with st.chat_message("user"):
         st.write(user_prompt)
 
-    # Guardia de seguridad previo al rewriter (NUEVO)
     block_msg = b_backend.detectar_bloqueo_texto_usuario(user_prompt)
     if block_msg:
         with st.chat_message("assistant"):
             st.error(block_msg)
         st.session_state.mensajes.append({"role": "assistant", "content": block_msg, "df": None})
     else:
-        # Contexto institucional desde TXT (NUEVO)
         if b_backend.es_pregunta_contexto(user_prompt):
             respuesta_ctx = b_backend.responder_contexto_desde_txt(user_prompt)
             with st.chat_message("assistant"):
                 st.write(respuesta_ctx)
             st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ctx, "df": None})
         else:
-            # Rewriter + backend SQL
             pregunta_final = reescribir_pregunta_si_aplica(user_prompt)
             if pregunta_final == "FUERA_DE_ALCANCE":
                 with st.chat_message("assistant"):
                     st.warning("Fuera de alcance: este bot consulta solo la tabla socios. Revisa los campos disponibles arriba.")
-                st.session_state.mensajes.append({"role": "assistant", "content": "Fuera de alcance. Usa los campos de `socios`.", "df": None})
+                st.session_state.mensajes.append({"role": "assistant", "content": "Fuera de alcance. Usa los campos de socios.", "df": None})
             else:
                 with st.chat_message("assistant"):
                     with st.spinner("Pensando..."):
                         texto, df, sql = b_backend.consulta(pregunta_final)
 
-                    # Pintar bloqueos del backend como error
                     if (texto or "").startswith("🚫 Acción bloqueada por seguridad") or \
                        "bloqueada por seguridad" in (texto or "").lower():
                         st.error(texto)
@@ -314,9 +293,7 @@ if prompt:
 
                 st.session_state.mensajes.append({"role": "assistant", "content": texto, "df": df})
 
-# =========================
-# Reset
-# =========================
+# Reinicio
 if st.button("🧹 Nueva conversación"):
     st.session_state.mensajes = []
     st.rerun()
