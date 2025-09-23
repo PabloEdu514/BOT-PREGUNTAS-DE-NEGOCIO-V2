@@ -1,16 +1,21 @@
-# front_app.py (chips 15/pg, flechas instantáneas + expander full width)
+# c_front_end.py
 import time
 import streamlit as st
 import b_backend
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
-st.set_page_config(page_title="BOT Socios | Análisis SQL", page_icon="🤖", layout="wide")
+st.set_page_config(
+    page_title="BOT Socios | Análisis SQL",
+    page_icon="Valladolid.jpeg",
+    layout="wide"
+)
+
 st.title("🤖 BOT PARA RESPONDER PREGUNTAS DE NEGOCIO SOBRE SOCIOS")
 st.write("")
 
 # =========================
-# ESTILOS (chips y paginación sutil)
+# ESTILOS
 # =========================
 st.markdown("""
 <style>
@@ -23,7 +28,7 @@ st.markdown("""
 }
 .chip:hover{ background:rgba(255,255,255,0.10); border-color:rgba(255,255,255,0.25); }
 
-/* barra inferior: info a la izquierda, flechas pegadas a la derecha */
+/* barra inferior: info a la izquierda, flechas a la derecha */
 .pager-bar{ display:flex; align-items:center; gap:8px; margin-top:6px; }
 .pager-info{ font-size:12px; opacity:.75; }
 .pager-spacer{ flex:1; }
@@ -36,26 +41,20 @@ st.markdown("""
 .stButton>button:hover{ background:rgba(255,255,255,0.08); border-color:rgba(255,255,255,0.25); }
 .stButton>button:disabled{ opacity:.35; }
 
-/* expander full width (ya está fuera de columnas) */
+/* expander full width */
 .full-expander { margin-top:8px; }
 </style>
 """, unsafe_allow_html=True)
 
 # =========================
-# FUNCIÓN: paginación sin rerun (fijo 15 por página)
+# FUNCIÓN: chips 15/pg con flechas instantáneas (sin rerun)
 # =========================
 def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
-    """
-    Chips con paginación suave:
-      - Siempre 15 por página.
-      - Sin st.rerun() al navegar.
-      - Re-render de flechas con claves dinámicas para que el habilitado cambie al instante.
-    """
     if not campos:
         st.info("No pude leer columnas de `socios` aún.")
         return
 
-    PAGE_SIZE = 15
+    PAGE_SIZE = 18
     pkey = f"{ss_key}_page"
     if pkey not in st.session_state:
         st.session_state[pkey] = 1
@@ -65,11 +64,9 @@ def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
     st.session_state[pkey] = max(1, min(st.session_state[pkey], total_pages))
     cur = st.session_state[pkey]
 
-    # Placeholders para poder re-renderizar en la misma ejecución
     chips_ph = st.container()
     bar_ph = st.empty()
 
-    # --- función que pinta la barra con un set de claves único por página ---
     def draw_bar(cur_page: int):
         with bar_ph.container():
             left, right = st.columns([8, 2])
@@ -91,23 +88,18 @@ def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
                                                    disabled=(cur_page >= total_pages))
         return prev_clicked_local, next_clicked_local
 
-    # 1) Pintamos barra y leemos clics
     prev_clicked, next_clicked = draw_bar(cur)
 
-    # 2) Actualizamos página en memoria
     new_cur = cur
     if prev_clicked:
         new_cur = max(1, cur - 1)
     if next_clicked:
         new_cur = min(total_pages, cur + 1)
 
-    # 3) Si la página cambió, re-pintamos la barra con las NUEVAS claves para que
-    #    el estado habilitado/inhabilitado se actualice al instante sin rerun.
     if new_cur != cur:
         st.session_state[pkey] = new_cur
         prev_clicked, next_clicked = draw_bar(new_cur)
 
-    # 4) Calculamos y pintamos chips
     cur = st.session_state[pkey]
     start, end = (cur - 1) * PAGE_SIZE, (cur - 1) * PAGE_SIZE + PAGE_SIZE
     visibles = campos[start:end]
@@ -125,7 +117,7 @@ with st.container():
 
     with col1:
         st.subheader("¿Sobre qué puedo preguntar?")
-        st.caption("Este bot consulta **solo** la tabla `socios`. No responde colocaciones, transacciones, ni otros módulos.")
+        st.caption("Este bot consulta **solo** la tabla socios. No responde colocaciones, transacciones, ni otros módulos.")
         campos = b_backend.get_campos_socios()
         render_campos_paginado_15(campos, ss_key="campos_socios")
 
@@ -179,13 +171,13 @@ with st.container():
         auto_inyectar = st.checkbox("Agregar estos filtros a mi pregunta", value=False)
 
 # =========================
-# Expander de ejemplos: FUERA de columnas (full width)
+# Expander de ejemplos (full width)
 # =========================
 st.markdown('<div class="full-expander">', unsafe_allow_html=True)
 with st.expander("💡 Ver ejemplos listos", expanded=False):
     ejemplos = [
         "💰 MUÉSTRAME LOS 5 NÚMEROS DE SOCIOS CON MAYOR SALDO EN DPFs",
-        "💳 ¿CUÁNTOS SOCIOS TIENEN TARJETA DE CRÉDITO?",
+        "💳 ¿CUÁNTOS SOCIOS TIENEN TARJETA DE CRÉDITO EN LA REGIÓN ORIENTE?",
         "📊 DAME LA SUMA DE SALDO DE AHORRO DE SOCIOS QUE ESTÁN EN CARTERA VENCIDA",
         "🌎 AGRÚPAME LAS SUMAS DE RESPONSABILIDAD TOTAL DE LOS CRÉDITOS ACTIVOS POR REGIONES",
         "⭐ ¿QUIÉN ES EL SOCIO QUE TIENE EL MAYOR BC SCORE?",
@@ -262,7 +254,7 @@ for i, m in enumerate(st.session_state.mensajes):
                                key=f"dl_hist_{i}")
 
 # =========================
-# Input del usuario
+# Input del usuario (+ guardas)
 # =========================
 prompt = st.chat_input("¿En qué te puedo ayudar?")
 if prompt:
@@ -277,33 +269,50 @@ if prompt:
     with st.chat_message("user"):
         st.write(user_prompt)
 
-    pregunta_final = reescribir_pregunta_si_aplica(user_prompt)
-    if pregunta_final == "FUERA_DE_ALCANCE":
+    # Guardia de seguridad previo al rewriter (NUEVO)
+    block_msg = b_backend.detectar_bloqueo_texto_usuario(user_prompt)
+    if block_msg:
         with st.chat_message("assistant"):
-            st.warning("Fuera de alcance: este bot consulta solo la tabla socios. Revisa los campos disponibles arriba.")
-        st.session_state.mensajes.append({"role": "assistant", "content": "Fuera de alcance. Usa los campos de socios.", "df": None})
+            st.error(block_msg)
+        st.session_state.mensajes.append({"role": "assistant", "content": block_msg, "df": None})
     else:
-        with st.chat_message("assistant"):
-            with st.spinner("Pensando..."):
-                texto, df, sql = b_backend.consulta(pregunta_final)
-
-            if "bloqueada por seguridad" in (texto or "").lower():
-                st.error("🔒 Consulta bloqueada por seguridad: solo se permiten operaciones SELECT.")
+        # Contexto institucional desde TXT (NUEVO)
+        if b_backend.es_pregunta_contexto(user_prompt):
+            respuesta_ctx = b_backend.responder_contexto_desde_txt(user_prompt)
+            with st.chat_message("assistant"):
+                st.write(respuesta_ctx)
+            st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ctx, "df": None})
+        else:
+            # Rewriter + backend SQL
+            pregunta_final = reescribir_pregunta_si_aplica(user_prompt)
+            if pregunta_final == "FUERA_DE_ALCANCE":
+                with st.chat_message("assistant"):
+                    st.warning("Fuera de alcance: este bot consulta solo la tabla socios. Revisa los campos disponibles arriba.")
+                st.session_state.mensajes.append({"role": "assistant", "content": "Fuera de alcance. Usa los campos de `socios`.", "df": None})
             else:
-                st.write(texto)
-                if sql is not None:
-                    with st.expander("📄 Ver consulta SQL generada"):
-                        st.code(sql, language="sql")
+                with st.chat_message("assistant"):
+                    with st.spinner("Pensando..."):
+                        texto, df, sql = b_backend.consulta(pregunta_final)
 
-            if df is not None:
-                height = _altura_para_df(len(df))
-                st.dataframe(df, use_container_width=True, height=height)
-                st.download_button("📥 Exportar este resultado a CSV",
-                                   df.to_csv(index=False).encode("utf-8"),
-                                   f"resultado_{int(time.time())}.csv", mime="text/csv",
-                                   key=f"dl_new_{int(time.time()*1000)}")
+                    # Pintar bloqueos del backend como error
+                    if (texto or "").startswith("🚫 Acción bloqueada por seguridad") or \
+                       "bloqueada por seguridad" in (texto or "").lower():
+                        st.error(texto)
+                    else:
+                        st.write(texto)
+                        if sql is not None:
+                            with st.expander("📄 Ver consulta SQL generada"):
+                                st.code(sql, language="sql")
 
-        st.session_state.mensajes.append({"role": "assistant", "content": texto, "df": df})
+                    if df is not None:
+                        height = _altura_para_df(len(df))
+                        st.dataframe(df, use_container_width=True, height=height)
+                        st.download_button("📥 Exportar este resultado a CSV",
+                                           df.to_csv(index=False).encode("utf-8"),
+                                           f"resultado_{int(time.time())}.csv", mime="text/csv",
+                                           key=f"dl_new_{int(time.time()*1000)}")
+
+                st.session_state.mensajes.append({"role": "assistant", "content": texto, "df": df})
 
 # =========================
 # Reset

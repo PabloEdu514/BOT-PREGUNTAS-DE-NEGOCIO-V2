@@ -15,7 +15,7 @@ from langchain.chains import create_sql_query_chain
 from langchain_core.prompts import PromptTemplate
 
 # =========================
-#  DESCARGA ROBUSTA DE LA BASE DE DATOS (igual que tu versión)
+#  DESCARGA ROBUSTA DE LA BASE DE DATOS
 # =========================
 @st.cache_data(ttl=3600)
 def download_database():
@@ -29,7 +29,7 @@ def download_database():
             os.remove(db_path)
 
     try:
-        file_id = "1YDmVjf5Nrz9Llgtka3KQMBUKwsnSF5vk"
+        file_id = "16SxTNCnJAk2zh9U61gWkm0ggSokqxM89"
         url = f"https://drive.google.com/uc?id={file_id}"
 
         progress_container = st.container()
@@ -125,7 +125,7 @@ def init_database():
 
 db = init_database()
 
-# 🔐 Configurar API KEY (igual que tu versión)
+# 🔐 Configurar API KEY
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 else:
@@ -144,14 +144,12 @@ def es_consulta_segura(sql):
     sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
     if not sql.startswith("select"):
         return False
-    peligrosas = ["insert", "update", "delete", "drop", "alter", "create", "truncate", "replace", "attach", "detach", "pragma", "exec", "execute"]
+    peligrosas = ["insert", "update", "delete", "drop", "alter", "create", "truncate",
+                  "replace", "attach", "detach", "pragma", "exec", "execute", "vacuum"]
     return not any(p in sql for p in peligrosas)
 
 def quitar_acentos(texto):
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', texto)
-        if unicodedata.category(c) != 'Mn'
-    )
+    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
 
 def corregir_sql_sucursal(sql):
     patron = re.compile(r'"?SUCURSAL"?\s*=\s*\'([^\']+)\'', re.IGNORECASE)
@@ -182,7 +180,34 @@ def expandir_pregunta_con_memoria(pregunta):
     return pregunta
 
 # =========================
-#  WHITELIST DE TABLA Y COLUMNAS (NUEVO)
+#  GUARDAS DE SEGURIDAD EN LENGUAJE NATURAL (NUEVO)
+# =========================
+SECURITY_BLOCK_TEXT = (
+    "🚫 Acción bloqueada por seguridad: este bot **solo consulta** la base (operaciones SELECT). "
+    "No es posible borrar, modificar ni crear datos o estructuras "
+    "(INSERT/UPDATE/DELETE/ALTER/DROP/TRUNCATE/PRAGMA/ATTACH/DETACH...)."
+)
+
+PATS_DANGEROUS = [
+    r"\b(borrar|borra|eliminar|elimina|vaciar|vacía|truncate)\b",
+    r"\b(drop\s+(table|database)|alter\s+(table|database)|create\s+(table|database|index))\b",
+    r"\b(insertar|insert|actualiza(r)?|update|delete|reemplazar|replace)\b",
+    r"\b(attach|detach|pragma|vacuum)\b",
+    r"\bformatea(r)?\b",
+    r"\bunion\s+select\b",
+    r";\s*(drop|truncate|alter|insert|update|delete|create|attach|detach|pragma)"
+]
+
+def detectar_bloqueo_texto_usuario(texto: str) -> str | None:
+    """Devuelve el mensaje de bloqueo si el texto del usuario sugiere una acción no permitida."""
+    t = quitar_acentos((texto or "").lower())
+    for pat in PATS_DANGEROUS:
+        if re.search(pat, t):
+            return SECURITY_BLOCK_TEXT
+    return None
+
+# =========================
+#  WHITELIST DE TABLA Y COLUMNAS
 # =========================
 @st.cache_data
 def get_schema_whitelist(db_path="ecommerce.db"):
@@ -192,14 +217,13 @@ def get_schema_whitelist(db_path="ecommerce.db"):
         cols = cur.execute("PRAGMA table_info('socios')").fetchall()
         conn.close()
         allowed_table = "socios"
-        allowed_cols = [c[1] for c in cols]  # nombre de columna
+        allowed_cols = [c[1] for c in cols]
         return allowed_table, set(allowed_cols)
     except Exception:
         return "socios", set()
 
 ALLOWED_TABLE, ALLOWED_COLS = get_schema_whitelist("ecommerce.db")
 
-# Clasificador simple de alcance (NUEVO)
 OFFTOPIC_HINTS = {
     "fuera_alcance": (
         "Fuera de alcance: este bot consulta **solo la tabla socios**. "
@@ -216,41 +240,34 @@ def es_en_alcance(pregunta: str) -> bool:
         "facturas","inventario","producto","productos","orden","pedido","pedidos"
     ]
     if any(w in pregunta.lower() for w in fuera):
-        # Permite si aun así menciona explícitamente alguna columna de 'socios'
         if not any(c.lower().replace("_"," ") in pregunta.lower() for c in ALLOWED_COLS):
             return False
     return True
 
 def valida_sql_whitelist(sql: str) -> bool:
     low = sql.lower()
-    # Solo tabla socios
     if " from " in low and " from socios" not in low:
         return False
-    # Bloquea joins por si acaso (este bot es mono-tabla)
     if " join " in low:
         return False
     return True
 
 # =========================
-#  EXTRAS PARA EL FRONT (chips y selects) (NUEVO)
+#  EXTRAS PARA EL FRONT (chips y selects)
 # =========================
 def get_campos_socios():
-    """Devuelve lista de columnas de la tabla socios."""
     return sorted(list(ALLOWED_COLS))
 
 def get_distinct_values(colname: str, limit: int = 200):
-    """Devuelve valores distintos de una columna de socios (para selects)."""
     if colname not in ALLOWED_COLS:
         return []
     try:
         conn = sqlite3.connect("ecommerce.db")
         cur = conn.cursor()
-        # Nota: comillas dobles por si el nombre tiene espacios
         q = f'SELECT DISTINCT "{colname}" FROM socios WHERE "{colname}" IS NOT NULL LIMIT {int(limit)}'
         rows = cur.execute(q).fetchall()
         conn.close()
         vals = [r[0] for r in rows if r[0] is not None]
-        # Convertir a str y quitar acentos si es sucursal para consistencia visual
         if colname.lower() == "sucursal":
             vals = sorted({quitar_acentos(str(v)).upper() for v in vals})
         else:
@@ -259,12 +276,7 @@ def get_distinct_values(colname: str, limit: int = 200):
     except Exception:
         return []
 
-# === NUEVO: mapas Región <-> Sucursal y utilidades ===
 def get_sucursal_region_map(normalizar=True):
-    """
-    Regresa una lista de tuplas (SUCURSAL, REGION) únicas.
-    Si normalizar=True, devuelve SUCURSAL sin acento y en UPPER (consistente con tu UPPER(SUCURSAL)).
-    """
     try:
         conn = sqlite3.connect("ecommerce.db")
         cur = conn.cursor()
@@ -283,24 +295,16 @@ def get_sucursal_region_map(normalizar=True):
         return []
 
 def get_regiones():
-    vals = get_distinct_values("REGION")
-    return vals
+    return get_distinct_values("REGION")
 
 def get_sucursales():
-    vals = get_distinct_values("SUCURSAL")
-    return vals
+    return get_distinct_values("SUCURSAL")
 
 def get_sucursales_por_region(region: str):
-    """
-    Devuelve sucursales NORMALIZADAS (UPPER sin acento) que pertenecen a la 'region' dada (texto tal cual aparece en DB).
-    """
-    pares = get_sucursal_region_map(normalizar=True)  # (SUCURSAL_NORMALIZADA, REGION)
+    pares = get_sucursal_region_map(normalizar=True)
     return sorted({s for (s, r) in pares if str(r) == str(region)})
 
 def get_region_de_sucursal(sucursal_norm: str):
-    """
-    Dada una sucursal NORMALIZADA (UPPER sin acento), devuelve su región (o None).
-    """
     pares = get_sucursal_region_map(normalizar=True)
     for s, r in pares:
         if s == sucursal_norm:
@@ -311,6 +315,72 @@ def pertenece_sucursal_a_region(sucursal_norm: str, region: str) -> bool:
     r = get_region_de_sucursal(sucursal_norm)
     return (r is not None) and (str(r) == str(region))
 
+# =========================
+#  CONTEXTO INSTITUCIÓN (desde TXT)
+# =========================
+INSTITUCION = {
+    "nombre": (st.secrets.get("INSTITUCION_NOMBRE") or "Caja Morelia Valladolid"),
+    "acronimo": (st.secrets.get("INSTITUCION_ACRONIMO") or "CMV"),
+    "tipo": (st.secrets.get("INSTITUCION_TIPO") or "Cooperativa de ahorro y préstamo"),
+}
+
+@st.cache_data(ttl=1800)
+def load_institution_txt(path: str | None = None) -> tuple[str, str]:
+    ruta = st.secrets.get("INSTITUCION_TXT_PATH") or path or "institucion.txt"
+    try:
+        with open(ruta, "r", encoding="utf-8") as f:
+            return f.read().strip(), ruta
+    except Exception:
+        return "", ruta
+
+@st.cache_data(ttl=900)
+def get_metricas_socios_basicas() -> dict:
+    try:
+        conn = sqlite3.connect("ecommerce.db")
+        cur = conn.cursor()
+        total = cur.execute('SELECT COUNT(*) FROM socios').fetchone()[0] or 0
+        regiones = cur.execute('SELECT COUNT(DISTINCT "REGION") FROM socios WHERE "REGION" IS NOT NULL').fetchone()[0] or 0
+        sucursales = cur.execute('SELECT COUNT(DISTINCT "SUCURSAL") FROM socios WHERE "SUCURSAL" IS NOT NULL').fetchone()[0] or 0
+        conn.close()
+        return {"total_socios": int(total), "regiones": int(regiones), "sucursales": int(sucursales)}
+    except Exception:
+        return {"total_socios": None, "regiones": None, "sucursales": None}
+
+def es_pregunta_contexto(texto: str) -> bool:
+    t = (texto or "").lower()
+    claves = [
+        "institución","institucion","en qué institución","en que institucion","dónde estamos","donde estamos",
+        "qué empresa","que empresa","qué cooperativa","que cooperativa","quiénes somos","quienes somos",
+        "nombre de la institución","nombre de la institucion","caja morelia","morelia valladolid","cmv",
+        "misión","mision","visión","vision","acerca de","about us"
+    ]
+    return any(k in t for k in claves)
+
+def responder_contexto_desde_txt(pregunta: str) -> str:
+    ctx, ruta = load_institution_txt()
+    m = get_metricas_socios_basicas()
+    nombre = INSTITUCION.get("nombre",""); acr = INSTITUCION.get("acronimo",""); tipo = INSTITUCION.get("tipo","")
+
+    if ctx:
+        llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+        prompt = (
+            "Eres un asistente de {nombre} ({acr}). Responde en español, breve y factual.\n"
+            "SOLO usa el siguiente CONTEXTO. Si la respuesta no está en el contexto, responde: "
+            "\"No está en el contexto.\".\n\n"
+            "### CONTEXTO (desde {ruta}):\n{ctx}\n\n"
+            "### PREGUNTA:\n{q}\n\n"
+            "### RESPUESTA:"
+        ).format(nombre=nombre, acr=acr, ruta=ruta, ctx=ctx[:28000], q=pregunta)
+        return llm.invoke(prompt).content.strip()
+
+    def fmt(n):
+        try: return f"{int(n):,}"
+        except: return "N/D"
+
+    extra = ""
+    if m["total_socios"] is not None:
+        extra = f" Actualmente contamos con {fmt(m['total_socios'])} socios, en {fmt(m['regiones'])} regiones y {fmt(m['sucursales'])} sucursales."
+    return f"Estamos en {nombre} ({acr}), una {tipo}.{extra}"
 
 # =========================
 #  CADENA LLM / PROMPTS
@@ -326,11 +396,10 @@ def init_chain():
         llm = ChatOpenAI(model_name='gpt-4', temperature=0)
         query_chain = create_sql_query_chain(llm, db)
 
-        # Prompt de respuesta con recordatorio de alcance (NUEVO)
         answer_prompt = PromptTemplate.from_template(
             """Eres un analista que responde SOLO con base en la tabla `socios`.
 Si la pregunta no se puede resolver con columnas de `socios`, responde en una línea:
-"Fuera de alcance: este bot solo consulta la tabla socios (campos disponibles)."
+"Fuera de alcance: este bot solo consulta la tabla `socios` (campos disponibles)."
 
 Reglas:
 - NO inventes columnas ni tablas.
@@ -360,7 +429,7 @@ def consulta(pregunta_usuario):
         if "OPENAI_API_KEY" not in os.environ:
             return "❌ No se configuró la API Key.", None, None
 
-        # Chequeo de alcance (NUEVO)
+        # Chequeo de alcance
         if not es_en_alcance(pregunta_usuario):
             hint = OFFTOPIC_HINTS["fuera_alcance"].format(
                 cols=", ".join(get_campos_socios()[:18]) + ("…" if len(ALLOWED_COLS) > 18 else "")
@@ -380,12 +449,13 @@ def consulta(pregunta_usuario):
         consulta_sql = eliminar_limit_si_lista_sucursales(consulta_sql)
         consulta_sql = dejar_solo_un_statement(consulta_sql)
 
+        # Seguridad SQL
         if not es_consulta_segura(consulta_sql):
-            return "❌ Consulta bloqueada por seguridad. Solo se permiten operaciones SELECT.", None, None
+            return SECURITY_BLOCK_TEXT, None, None
 
-        # Validación de whitelist (NUEVO)
+        # Whitelist tabla única
         if not valida_sql_whitelist(consulta_sql):
-            return "🔒 La consulta hace referencia a objetos fuera de la tabla `socios`.", None, None
+            return "🔒 La consulta hace referencia a objetos fuera de la tabla socios.", None, None
 
         if "limit" not in consulta_sql.lower():
             consulta_sql += " LIMIT 1000"
