@@ -160,6 +160,72 @@ def eliminar_limit_si_lista_sucursales(sql):
 def dejar_solo_un_statement(sql: str) -> str:
     return sql.split(";")[0].strip()
 
+# ---- NUEVOS HELPERS PARA MANEJO INTELIGENTE DE LIMIT ----
+
+def quitar_limits_global(sql: str) -> str:
+    if not sql:
+        return sql
+    s = sql
+    s = re.sub(r'(?is)\blimit\s+\d+(?:\s+offset\s+\d+)?\s*;?', ' ', s)  # LIMIT [n] [OFFSET m]
+    s = re.sub(r'(?is)\bfetch\s+first\s+\d+\s+rows\s+only\s*;?', ' ', s)
+    s = re.sub(r'(?is)\boffset\s+\d+\s+rows\s+fetch\s+next\s+\d+\s+rows\s+only\s*;?', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+_NUM_WORDS = {
+    "un":1, "uno":1, "una":1,
+    "dos":2, "tres":3, "cuatro":4, "cinco":5, "seis":6,
+    "siete":7, "ocho":8, "nueve":9, "diez":10,
+    "once":11, "doce":12, "trece":13, "catorce":14,
+    "quince":15, "veinte":20
+}
+
+def _palabras_a_digitos(t: str) -> str:
+    return re.sub(
+        r'\b(un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|veinte)\b',
+        lambda m: str(_NUM_WORDS[m.group(1)]), t, flags=re.IGNORECASE
+    )
+
+def extraer_limit_de_pregunta(texto: str):
+    if not texto:
+        return None
+    t = texto.lower()
+    t = re.sub(r'\b20\d{2}\b', ' ', t)  # quitar años
+    t = _palabras_a_digitos(t)
+    t = re.sub(r'\btop\s*-\s*(\d+)\b', r'top \1', t)
+    t = re.sub(r'\btop(\d+)\b', r'top \1', t)
+
+    patrones = [
+        r'\btop\s+(\d+)\b',
+        r'\bprimer(?:os|as)?\s+(\d+)\b',
+        r'\b(?:los|las)\s+(\d+)\s+(?:sucursales|regiones|filas|registros|resultados|clientes)\b',
+        r'\bmostrar\s+(\d+)\b',
+        r'\blos\s+(\d+)\s+m[aá]s\b',
+    ]
+    for pat in patrones:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            try:
+                n = int(m.group(1))
+                if n > 0:
+                    return n
+            except:
+                pass
+    return None
+
+def _pide_todo(texto: str) -> bool:
+    if not texto:
+        return False
+    return bool(re.search(r'\b(todas?|todo|completa|sin\s+l[ií]mite)\b', texto.lower()))
+
+def agregar_limit_si_no_existe(sql: str, n: int) -> str:
+    if not sql:
+        return sql
+    if re.search(r'\blimit\s+\d+\b', sql, flags=re.IGNORECASE):
+        return sql
+    return sql.rstrip(';') + f' LIMIT {n}'
+
+
 def actualizar_ultimo_socio(sql):
     patron = re.compile(r'"?NUMERO SOCIO"?\s*=\s*(\d+)', re.IGNORECASE)
     match = patron.search(sql)
@@ -336,11 +402,16 @@ def es_pregunta_contexto(texto: str) -> bool:
     t = (texto or "").lower()
     claves = [
         "institución","institucion","en qué institución","en que institucion","dónde estamos","donde estamos",
-        "qué empresa","que empresa","qué cooperativa","que cooperativa","quiénes somos","quienes somos",
-        "nombre de la institución","nombre de la institucion","caja morelia","morelia valladolid","cmv",
+        "qué empresa","que empresa","qué cooperativa","que cooperativa",
+        "informacion de la cooperativa","información de la cooperativa","sobre la cooperativa",
+        "acerca de la cooperativa","info de la cooperativa","datos de la cooperativa",
+        "quiénes somos","quienes somos",
+        "nombre de la institución","nombre de la institucion",
+        "caja morelia","morelia valladolid","cmv",
         "misión","mision","visión","vision","acerca de","about us"
     ]
     return any(k in t for k in claves)
+
 
 def responder_contexto_desde_txt(pregunta: str) -> str:
     ctx, ruta = load_institution_txt()
@@ -423,21 +494,28 @@ def consulta(pregunta_usuario):
 
         pregunta_usuario = expandir_pregunta_con_memoria(pregunta_usuario)
 
+        # Detectar si el usuario pidió límite explícito
+        user_limit = extraer_limit_de_pregunta(pregunta_usuario)
+        if _pide_todo(pregunta_usuario):
+            user_limit = None
+
         with st.spinner("Generando consulta SQL..."):
             consulta_sql = query_chain.invoke({"question": pregunta_usuario})
 
         consulta_sql = corregir_sql_sucursal(consulta_sql)
         consulta_sql = eliminar_limit_si_lista_sucursales(consulta_sql)
         consulta_sql = dejar_solo_un_statement(consulta_sql)
+        consulta_sql = quitar_limits_global(consulta_sql)
+
+        # Agregar LIMIT solo si el usuario lo pidió
+        if user_limit is not None:
+            consulta_sql = agregar_limit_si_no_existe(consulta_sql, user_limit)
 
         if not es_consulta_segura(consulta_sql):
             return SECURITY_BLOCK_TEXT, None, None
 
         if not valida_sql_whitelist(consulta_sql):
             return "🔒 La consulta hace referencia a objetos fuera de la tabla socios.", None, None
-
-        if "limit" not in consulta_sql.lower():
-            consulta_sql += " LIMIT 1000"
 
         with st.spinner("Ejecutando consulta segura..."):
             conn = sqlite3.connect("ecommerce.db")
@@ -449,7 +527,16 @@ def consulta(pregunta_usuario):
 
         actualizar_ultimo_socio(consulta_sql)
 
-        resultado = str(filas[:10]) + (" ..." if len(filas) > 10 else "")
+        try:
+            import pandas as pd
+            preview_df = pd.DataFrame(filas[:10], columns=columnas)
+            resultado = preview_df.to_markdown(index=False)
+        except Exception:
+            resultado = " | ".join(columnas) + "\n"
+            resultado += "\n".join([" | ".join(map(str, fila)) for fila in filas[:10]])
+            if len(filas) > 10:
+                resultado += "\n..."
+
         with st.spinner("Generando respuesta..."):
             respuesta = llm.invoke(prompt.format_prompt(
                 question=pregunta_usuario,
