@@ -8,15 +8,15 @@ import streamlit as st
 import pandas as pd
 import gdown
 import unicodedata
-import re, unicodedata
-
 
 from langchain_community.utilities import SQLDatabase
 from langchain_openai import ChatOpenAI
 from langchain.chains import create_sql_query_chain
 from langchain_core.prompts import PromptTemplate
 
-# Descarga de la base de datos desde Google Drive
+# =========================
+# Descarga de la base de datos
+# =========================
 @st.cache_data(ttl=3600)
 def download_database():
     db_path = "ecommerce.db"
@@ -113,7 +113,9 @@ def download_database():
         if 'progress_container' in locals():
             progress_container.empty()
 
-# Inicialización de la base de datos
+# =========================
+# Inicialización DB y API
+# =========================
 @st.cache_resource
 def init_database():
     try:
@@ -126,7 +128,6 @@ def init_database():
 
 db = init_database()
 
-# Configuración de API KEY
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 else:
@@ -136,23 +137,200 @@ else:
     except ImportError:
         st.warning("No se encontró la API Key de OpenAI.")
 
-# Validaciones y utilidades de seguridad
-def es_consulta_segura(sql):
-    sql = sql.strip().lower()
-    sql = re.sub(r'--.*?(\n|$)', '', sql)
-    sql = re.sub(r'/\*.*?\*/', '', sql, flags=re.DOTALL)
-    if not sql.startswith("select"):
+# =========================
+# Seguridad y utilidades
+# =========================
+# --- Reemplaza tu versión por esta ---
+def es_consulta_segura(sql: str) -> bool:
+    """
+    Permite solo SELECT/CTE y bloquea DDL/DML reales.
+    Acepta el uso de funciones como REPLACE() dentro de SELECT.
+    """
+    s = (sql or "").strip()
+
+    # Quitar comentarios
+    s = re.sub(r'--.*?$', '', s, flags=re.MULTILINE)
+    s = re.sub(r'/\*.*?\*/', '', s, flags=re.DOTALL)
+
+    # Normalizar para matching
+    slow = re.sub(r'\s+', ' ', s).strip().lower()
+
+    # Debe iniciar con SELECT o WITH (CTE)
+    if not (slow.startswith("select") or slow.startswith("with")):
         return False
-    peligrosas = ["insert", "update", "delete", "drop", "alter", "create", "truncate",
-                  "replace", "attach", "detach", "pragma", "exec", "execute", "vacuum"]
-    return not any(p in sql for p in peligrosas)
+
+    # Prohibir múltiples sentencias
+    if ';' in slow.strip().rstrip(';'):
+        return False
+
+    # Bloquear DDL/DML peligrosos (palabras completas)
+    dangerous = [
+        r'\binsert\b', r'\bupdate\b', r'\bdelete\b', r'\bdrop\b', r'\balter\b',
+        r'\bcreate\b', r'\btruncate\b', r'\battach\b', r'\bdetach\b',
+        r'\bpragma\b', r'\bexec(ute)?\b', r'\bvacuum\b',
+        r'\bunion\s+select\b'  # evita exfiltración vía UNION
+    ]
+    if any(re.search(p, slow) for p in dangerous):
+        return False
+
+    # Bloquear específicamente "replace into" o "or replace" en DDL/DML,
+    # pero permitir la función REPLACE() en SELECT
+    if re.search(r'\breplace\s+into\b', slow) or re.search(r'\b(or\s+)?replace\b\s+(into|table|view|index)\b', slow):
+        return False
+
+    return True
+
 
 def quitar_acentos(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
 
+
+# ---------- Normalización visual de IDs ----------
+ID_COLS = {"NUMERO SOCIO"}  # agrega más si quieres
+
+def _to_plain_int_str(v):
+    if v is None:
+        return ""
+    s = str(v).strip()
+    # 1.01346e+06 -> 1013460
+    if re.fullmatch(r'-?\d+(?:\.\d+)?[eE][+-]?\d+', s):
+        try:
+            return str(int(float(s)))
+        except:
+            return s
+    # 1012345.0 -> 1012345
+    if re.fullmatch(r'-?\d+\.0+', s):
+        return s.split('.')[0]
+    return s
+
+def normalizar_ids_en_df(df: pd.DataFrame) -> pd.DataFrame:
+    for c in df.columns:
+        if c.strip().upper() in ID_COLS:
+            df[c] = df[c].map(_to_plain_int_str)
+    return df
+
+def desnotacion_cientifica_texto(texto: str) -> str:
+    # Post-proceso por si el LLM escribió IDs en notación científica
+    def repl(m):
+        try:
+            return str(int(float(m.group(0))))
+        except:
+            return m.group(0)
+    return re.sub(r'\b-?\d+(?:\.\d+)?[eE][+-]?\d+\b', repl, texto)
+
+
+
+# ---------- Preferir LISTADO cuando el usuario pide "tabla/lista" ----------
+_LISTA_TRIGGERS = [
+    "tabla", "lista", "listado", "listar", "muestrame", "muéstrame",
+    "dame", "dime", "enséñame", "numeros de socios", "números de socios",
+    "registros", "filas", "exportar", "exportame", "exportáme"
+]
+_CONTEO_TRIGGERS = ["cuantos", "cuántos", "conteo", "total", "número de", "numero de", "cantidad"]
+
+def usuario_quiere_listado(texto: str) -> bool:
+    t = (texto or "").lower()
+    return any(w in t for w in _LISTA_TRIGGERS) and not any(w in t for w in _CONTEO_TRIGGERS)
+
+def _col_numero_socio() -> str:
+    # Busca la columna "NUMERO SOCIO" según el esquema real
+    for c in ALLOWED_COLS:
+        if c.strip().upper() == "NUMERO SOCIO":
+            return c
+    # Fallback seguro
+    return "NUMERO SOCIO"
+
+def _extraer_where(sql: str) -> str:
+    # Captura el WHERE hasta antes de GROUP/ORDER/HAVING/LIMIT o fin
+    m = re.search(r'(?is)\bwhere\b(?P<w>.*?)(?=\bgroup\b|\border\b|\bhaving\b|\blimit\b|$)', sql)
+    return f" WHERE {m.group('w').strip()}" if m else ""
+
+def reescribir_count_a_listado(sql: str) -> str:
+    where = _extraer_where(sql)
+    col = _col_numero_socio()
+    return f'SELECT DISTINCT "{col}" FROM socios{where}'
+
+def forzar_listado_si_usuario_pide_tabla(sql: str, pregunta: str) -> str:
+    if not sql or not usuario_quiere_listado(pregunta):
+        return sql
+    if "count(" in sql.lower():
+        # Nota UX opcional
+        st.session_state["ux_hint"] = "Pediste tabla/lista; convertí un CONTEO a un listado."
+        return reescribir_count_a_listado(sql)
+    return sql
+
+
+
+
+
+# ---------- Normalización de REGION y SUCURSAL (robusta) ----------
+def _unaccent_upper(s: str) -> str:
+    if s is None:
+        return ""
+    n = unicodedata.normalize("NFKD", str(s))
+    return "".join(c for c in n if not unicodedata.combining(c)).upper().strip()
+
+def _qualified_col_regex(col: str) -> str:
+    """
+    Devuelve un patrón de regex que captura la columna con o sin alias:
+    - REGION, "REGION"
+    - socios.REGION, socios."REGION"
+    - "socios".REGION, "socios"."REGION"
+    """
+    esc = re.escape(col)
+    return rf'(?P<qcol>(?:(?:"[^"]+"|[A-Za-z_]\w*)\.)*"?{esc}"?)'
+
+def _norm_eq_in_like(sql: str, col: str) -> str:
+    s = sql
+    col_re = _qualified_col_regex(col)
+
+    # = 'literal'
+    s = re.sub(
+        rf'(?is){col_re}\s*=\s*\'(?P<val>[^\']*)\'',
+        lambda m: f"UPPER(TRIM({m.group('qcol')})) = '{_unaccent_upper(m.group('val'))}'",
+        s
+    )
+
+    # IN ('a','b', ...)
+    def _repl_in(m):
+        items_str = m.group('items')
+        lits = re.findall(r"'([^']*)'", items_str)
+        if lits:
+            items = ", ".join(f"'{_unaccent_upper(x)}'" for x in lits)
+        else:
+            items = items_str
+        return f"UPPER(TRIM({m.group('qcol')})) IN ({items})"
+
+    s = re.sub(
+        rf'(?is){col_re}\s+IN\s*\((?P<items>[^)]*)\)',
+        _repl_in,
+        s
+    )
+
+    # LIKE 'literal'
+    s = re.sub(
+        rf'(?is){col_re}\s+LIKE\s*\'(?P<val>[^\']*)\'',
+        lambda m: f"UPPER(TRIM({m.group('qcol')})) LIKE '{_unaccent_upper(m.group('val'))}'",
+        s
+    )
+
+    return s
+
+def normalizar_region_y_sucursal(sql: str) -> str:
+    s = _norm_eq_in_like(sql, "REGION")
+    s = _norm_eq_in_like(s, "SUCURSAL")
+    # Fallback suave: si quedó alguna igualdad directa sobre REGION, forzar NOCASE
+    s = re.sub(
+        r'(?is)(?:(?:"[^"]+"|[A-Za-z_]\w*)\.)*"?REGION"?\s*=\s*\'([^\']*)\'(?!\s*collate\s+nocase)',
+        lambda m: m.group(0) + " COLLATE NOCASE",
+        s
+    )
+    return s
+
+# (Mantenemos el nombre para compatibilidad; no cambies llamadas existentes)
 def corregir_sql_sucursal(sql):
-    patron = re.compile(r'"?SUCURSAL"?\s*=\s*\'([^\']+)\'', re.IGNORECASE)
-    return patron.sub(lambda m: f"UPPER(SUCURSAL) = '{quitar_acentos(m.group(1)).upper()}'", sql)
+    return _norm_eq_in_like(sql, "SUCURSAL")
+
 
 def eliminar_limit_si_lista_sucursales(sql):
     if re.search(r'select\s+distinct\s+"?sucursal"?\s+from', sql, re.IGNORECASE):
@@ -162,8 +340,7 @@ def eliminar_limit_si_lista_sucursales(sql):
 def dejar_solo_un_statement(sql: str) -> str:
     return sql.split(";")[0].strip()
 
-# ---- NUEVOS HELPERS PARA MANEJO INTELIGENTE DE LIMIT ----
-
+# ---------- Limit harmonizer ----------
 def quitar_limits_global(sql: str) -> str:
     if not sql:
         return sql
@@ -192,11 +369,9 @@ def extraer_limit_de_pregunta(texto: str):
     if not texto:
         return None
     t = texto.lower()
-    # Quitar años (para no confundir 2024, 2025, etc. con un límite)
+    # Quitar años
     t = re.sub(r'\b20\d{2}\b', ' ', t)
     t = _palabras_a_digitos(t)
-
-    # Normalizaciones útiles
     t = re.sub(r'\btop\s*-\s*(\d+)\b', r'top \1', t)
     t = re.sub(r'\btop(\d+)\b', r'top \1', t)
 
@@ -211,14 +386,12 @@ def extraer_limit_de_pregunta(texto: str):
     for pat in patrones:
         m = re.search(pat, t, flags=re.IGNORECASE)
         if m:
-            # toma el último grupo numérico
             nums = [int(x) for x in m.groups() if x and str(x).isdigit()]
             if nums:
                 n = nums[-1]
                 if n > 0:
                     return n
     return None
-
 
 def _pide_todo(texto: str) -> bool:
     if not texto:
@@ -232,7 +405,7 @@ def agregar_limit_si_no_existe(sql: str, n: int) -> str:
         return sql
     return sql.rstrip(';') + f' LIMIT {n}'
 
-
+# ---------- Memoria simple ----------
 def actualizar_ultimo_socio(sql):
     patron = re.compile(r'"?NUMERO SOCIO"?\s*=\s*(\d+)', re.IGNORECASE)
     match = patron.search(sql)
@@ -249,6 +422,7 @@ def expandir_pregunta_con_memoria(pregunta):
             return f"{pregunta} (número de socio {numero})"
     return pregunta
 
+# ---------- Bloqueos de seguridad ----------
 SECURITY_BLOCK_TEXT = (
     "🚫 Acción bloqueada por seguridad: este bot solo consulta la base (operaciones SELECT). "
     "No es posible borrar, modificar ni crear datos o estructuras."
@@ -271,7 +445,7 @@ def detectar_bloqueo_texto_usuario(texto: str) -> str | None:
             return SECURITY_BLOCK_TEXT
     return None
 
-# Definición de tabla y columnas permitidas
+# ---------- Whitelist esquema ----------
 @st.cache_data
 def get_schema_whitelist(db_path="ecommerce.db"):
     try:
@@ -307,15 +481,20 @@ def es_en_alcance(pregunta: str) -> bool:
             return False
     return True
 
+# --- Reemplaza tu valida_sql_whitelist por esta ---
 def valida_sql_whitelist(sql: str) -> bool:
-    low = sql.lower()
-    if " from " in low and " from socios" not in low:
-        return False
-    if " join " in low:
+    slow = re.sub(r'\s+', ' ', (sql or '')).lower()
+    # Solo permite seleccionar desde la tabla socios (con o sin comillas, con alias opcional)
+    if " from " in slow:
+        if not re.search(r'\bfrom\s+(?:"socios"|socios)\b', slow):
+            return False
+    # No se permiten JOINs
+    if re.search(r'\bjoin\b', slow):
         return False
     return True
 
-# Filtros para la interfaz
+
+# ---------- Filtros UI ----------
 def get_campos_socios():
     return sorted(list(ALLOWED_COLS))
 
@@ -376,7 +555,7 @@ def pertenece_sucursal_a_region(sucursal_norm: str, region: str) -> bool:
     r = get_region_de_sucursal(sucursal_norm)
     return (r is not None) and (str(r) == str(region))
 
-# Contexto de institución
+# ---------- Contexto de institución ----------
 INSTITUCION = {
     "nombre": (st.secrets.get("INSTITUCION_NOMBRE") or "Caja Morelia Valladolid"),
     "acronimo": (st.secrets.get("INSTITUCION_ACRONIMO") or "CMV"),
@@ -419,7 +598,6 @@ def es_pregunta_contexto(texto: str) -> bool:
     ]
     return any(k in t for k in claves)
 
-
 def responder_contexto_desde_txt(pregunta: str) -> str:
     ctx, ruta = load_institution_txt()
     m = get_metricas_socios_basicas()
@@ -446,7 +624,9 @@ def responder_contexto_desde_txt(pregunta: str) -> str:
         extra = f" Actualmente contamos con {fmt(m['total_socios'])} socios, en {fmt(m['regiones'])} regiones y {fmt(m['sucursales'])} sucursales."
     return f"Estamos en {nombre} ({acr}), una {tipo}.{extra}"
 
+# =========================
 # Inicialización de la cadena LLM
+# =========================
 @st.cache_resource
 def init_chain():
     global db
@@ -483,7 +663,45 @@ Respuesta concisa orientada a negocio:"""
         st.error(f"Error al inicializar la cadena: {str(e)}")
         return None, None, None, None
 
+# =========================
+# Casting defensivo en saldos
+# =========================
+_NUMERIC_TEXT_COLS = [
+    'SALDO CUENTA AHORRO',
+    'SALDO CUENTA INVERDINAMICA',
+    'SALDO'
+]
+
+def _cast_expr_for(col_name: str) -> str:
+    return f'CAST(REPLACE(REPLACE(REPLACE("{col_name}", ",", ""), "$", ""), " ", "") AS REAL)'
+
+# Casting defensivo en saldos (REEMPLAZA ESTA FUNCIÓN)
+def forzar_cast_numerico_en_saldos(sql: str) -> str:
+    """
+    Reescribe comparaciones numéricas sobre columnas de saldo que podrían ser texto.
+    Ej.: "SALDO CUENTA AHORRO" > 500  ->  CAST(... "SALDO CUENTA AHORRO" ...) > 500
+    """
+    s = sql
+    for col in _NUMERIC_TEXT_COLS:
+        # Construimos el patrón SIN usar f-string con backslashes en la expresión
+        esc = re.escape(col)                 # SALDO\ CUENTA\ AHORRO
+        esc_ws = esc.replace(" ", r"\s+")    # permite espacios variables: \s+
+        col_pat = '(?P<col>"{}"|{})'.format(esc, esc_ws)
+
+        # Patrón completo: <col> <op> <num>
+        pat = col_pat + r'\s*(?P<op>>=|<=|=|>|<)\s*(?P<num>\d+(?:\.\d+)?)'
+
+        def repl(m):
+            op = m.group("op")
+            num = m.group("num")
+            # Usamos el nombre oficial de la columna para el CAST
+            return f'{_cast_expr_for(col)} {op} {num}'
+
+        s = re.sub(pat, repl, s, flags=re.IGNORECASE)
+    return s
+# =========================
 # Ejecución de consultas SQL
+# =========================
 def consulta(pregunta_usuario, debug: bool = False):
     try:
         if "OPENAI_API_KEY" not in os.environ:
@@ -511,15 +729,22 @@ def consulta(pregunta_usuario, debug: bool = False):
         with st.spinner("Generando consulta SQL..."):
             sql_model_raw = query_chain.invoke({"question": pregunta_usuario})
 
-        # 3) Normalizaciones/correcciones
-        sql_corr = corregir_sql_sucursal(sql_model_raw)
+        # 3) Normalizaciones/correcciones (ANTES del harmonizer de LIMIT)
+        sql_corr = sql_model_raw
+        sql_corr = normalizar_region_y_sucursal(sql_corr)    # REGION y SUCURSAL -> UPPER(TRIM)
+        # Fallback opcional: si pegaste corregir_sucursal_inexacta_o_region
+        if 'corregir_sucursal_inexacta_o_region' in globals():
+            try:
+                sql_corr = corregir_sucursal_inexacta_o_region(sql_corr)
+            except Exception:
+                pass
+        sql_corr = forzar_cast_numerico_en_saldos(sql_corr)  # CAST defensivo en saldos
+        sql_corr = forzar_listado_si_usuario_pide_tabla(sql_corr, pregunta_usuario)
         sql_corr = eliminar_limit_si_lista_sucursales(sql_corr)
         sql_corr = dejar_solo_un_statement(sql_corr)
         sql_sin_limits = quitar_limits_global(sql_corr)
 
-        # 4) Reglas de armonización de LIMIT:
-        #    - Si el usuario SÍ pidió límite => imponemos LIMIT n.
-        #    - Si NO pidió => ejecutamos sin LIMIT (pero nunca dejamos inventados del modelo).
+        # 4) Harmonizer de LIMIT
         if user_limit is not None:
             sql_efectivo = agregar_limit_si_no_existe(sql_sin_limits, user_limit)
             modo = "sql_limit"
@@ -542,24 +767,33 @@ def consulta(pregunta_usuario, debug: bool = False):
             filas = cur.fetchall()
             conn.close()
 
-        # Cinturón y tirantes: si por alguna razón regresaron más filas que el límite pedido, recortamos en cliente
+        # 7) Cinturón y tirantes
         if user_limit is not None and len(filas) > user_limit:
             filas = filas[:user_limit]
             modo += "+client_cap"
 
         actualizar_ultimo_socio(sql_efectivo)
 
-        # 7) "resultado" solo para contexto del LLM (tomamos hasta 10 filas ya del EFECTIVO)
+        # 7.1) DataFrame y normalización de IDs (si está disponible)
+        df = pd.DataFrame(filas, columns=columnas)
+        _norm_ids_fn = globals().get("normalizar_ids_en_df")
+        if callable(_norm_ids_fn):
+            try:
+                df = _norm_ids_fn(df)
+            except Exception:
+                pass
+
+        # 8) Resultado para contexto (preview) usando el DF ya normalizado
         try:
-            preview_df = pd.DataFrame(filas[:10], columns=columnas)
+            preview_df = df.head(10)
             resultado_ctx = preview_df.to_markdown(index=False)
         except Exception:
-            resultado_ctx = " | ".join(columnas) + "\n"
-            resultado_ctx += "\n".join([" | ".join(map(str, f)) for f in filas[:10]])
-            if len(filas) > 10:
+            resultado_ctx = " | ".join(df.columns) + "\n"
+            resultado_ctx += "\n".join([" | ".join(map(str, f)) for f in df.head(10).values.tolist()])
+            if len(df) > 10:
                 resultado_ctx += "\n..."
 
-        # 8) Redacción con el MISMO SQL EFECTIVO
+        # 9) Redacción con el MISMO SQL EFECTIVO
         with st.spinner("Generando respuesta..."):
             respuesta = llm.invoke(prompt.format_prompt(
                 question=pregunta_usuario,
@@ -568,9 +802,19 @@ def consulta(pregunta_usuario, debug: bool = False):
                 cols=", ".join(get_campos_socios()[:25]) + ("…" if len(ALLOWED_COLS) > 25 else "")
             ).to_string())
 
-        df = pd.DataFrame(filas, columns=columnas)
+        # Post-proceso: quitar notación científica en el texto final y añadir nota UX si existe
+        texto_resp = respuesta.content
+        _desci_fn = globals().get("desnotacion_cientifica_texto")
+        if callable(_desci_fn):
+            try:
+                texto_resp = _desci_fn(texto_resp)
+            except Exception:
+                pass
+        nota = st.session_state.pop("ux_hint", None)
+        if nota:
+            texto_resp += f"\n\nℹ️ {nota}"
 
-        # 9) DEBUG UI (opcional)
+        # 10) DEBUG UI
         if debug:
             with st.expander("🔧 Debug de consulta", expanded=False):
                 st.write("**Pregunta usuario:**", pregunta_usuario)
@@ -585,7 +829,7 @@ def consulta(pregunta_usuario, debug: bool = False):
                 st.write("**Filas retornadas:**", len(df))
                 st.dataframe(df.head(min(10, len(df))))
 
-        return respuesta.content, df, sql_efectivo
+        return texto_resp, df, sql_efectivo
 
     except Exception as e:
         return f"⚠️ Error: {str(e)}", None, None
