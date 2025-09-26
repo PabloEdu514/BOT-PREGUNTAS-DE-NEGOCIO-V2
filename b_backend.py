@@ -8,6 +8,8 @@ import streamlit as st
 import pandas as pd
 import gdown
 import unicodedata
+import re, unicodedata
+
 
 from langchain_community.utilities import SQLDatabase
 from langchain_openai import ChatOpenAI
@@ -190,28 +192,33 @@ def extraer_limit_de_pregunta(texto: str):
     if not texto:
         return None
     t = texto.lower()
-    t = re.sub(r'\b20\d{2}\b', ' ', t)  # quitar años
+    # Quitar años (para no confundir 2024, 2025, etc. con un límite)
+    t = re.sub(r'\b20\d{2}\b', ' ', t)
     t = _palabras_a_digitos(t)
+
+    # Normalizaciones útiles
     t = re.sub(r'\btop\s*-\s*(\d+)\b', r'top \1', t)
     t = re.sub(r'\btop(\d+)\b', r'top \1', t)
 
     patrones = [
         r'\btop\s+(\d+)\b',
         r'\bprimer(?:os|as)?\s+(\d+)\b',
-        r'\b(?:los|las)\s+(\d+)\s+(?:sucursales|regiones|filas|registros|resultados|clientes)\b',
-        r'\bmostrar\s+(\d+)\b',
-        r'\blos\s+(\d+)\s+m[aá]s\b',
+        r'\b(dame|dime|mu[eé]strame|ens[eé]ñame|trae|pon|lista|listar|muestra|mostrar|encu[eé]ntrame)\s+(\d{1,4})\b',
+        r'\b(\d{1,4})\s+(socios?|clientes?|registros?|filas?|resultados?|n[uú]meros?)\b',
+        r'\blos\s+(\d{1,4})\s+m[aá]s\b',
+        r'\b(ultim[oa]s?)\s+(\d{1,4})\b',
     ]
     for pat in patrones:
         m = re.search(pat, t, flags=re.IGNORECASE)
         if m:
-            try:
-                n = int(m.group(1))
+            # toma el último grupo numérico
+            nums = [int(x) for x in m.groups() if x and str(x).isdigit()]
+            if nums:
+                n = nums[-1]
                 if n > 0:
                     return n
-            except:
-                pass
     return None
+
 
 def _pide_todo(texto: str) -> bool:
     if not texto:
@@ -477,7 +484,7 @@ Respuesta concisa orientada a negocio:"""
         return None, None, None, None
 
 # Ejecución de consultas SQL
-def consulta(pregunta_usuario):
+def consulta(pregunta_usuario, debug: bool = False):
     try:
         if "OPENAI_API_KEY" not in os.environ:
             return "❌ No se configuró la API Key.", None, None
@@ -492,61 +499,93 @@ def consulta(pregunta_usuario):
         if not query_chain or not db_sql:
             return "⚠️ No se pudo inicializar el sistema.", None, None
 
+        # Memoria de "último socio"
         pregunta_usuario = expandir_pregunta_con_memoria(pregunta_usuario)
 
-        # Detectar si el usuario pidió límite explícito
+        # 1) Detectar límite pedido por el usuario (o 'todo')
         user_limit = extraer_limit_de_pregunta(pregunta_usuario)
         if _pide_todo(pregunta_usuario):
             user_limit = None
 
+        # 2) Pedir SQL al modelo
         with st.spinner("Generando consulta SQL..."):
-            consulta_sql = query_chain.invoke({"question": pregunta_usuario})
+            sql_model_raw = query_chain.invoke({"question": pregunta_usuario})
 
-        consulta_sql = corregir_sql_sucursal(consulta_sql)
-        consulta_sql = eliminar_limit_si_lista_sucursales(consulta_sql)
-        consulta_sql = dejar_solo_un_statement(consulta_sql)
-        consulta_sql = quitar_limits_global(consulta_sql)
+        # 3) Normalizaciones/correcciones
+        sql_corr = corregir_sql_sucursal(sql_model_raw)
+        sql_corr = eliminar_limit_si_lista_sucursales(sql_corr)
+        sql_corr = dejar_solo_un_statement(sql_corr)
+        sql_sin_limits = quitar_limits_global(sql_corr)
 
-        # Agregar LIMIT solo si el usuario lo pidió
+        # 4) Reglas de armonización de LIMIT:
+        #    - Si el usuario SÍ pidió límite => imponemos LIMIT n.
+        #    - Si NO pidió => ejecutamos sin LIMIT (pero nunca dejamos inventados del modelo).
         if user_limit is not None:
-            consulta_sql = agregar_limit_si_no_existe(consulta_sql, user_limit)
+            sql_efectivo = agregar_limit_si_no_existe(sql_sin_limits, user_limit)
+            modo = "sql_limit"
+        else:
+            sql_efectivo = sql_sin_limits
+            modo = "sql_no_limit"
 
-        if not es_consulta_segura(consulta_sql):
+        # 5) Validaciones de seguridad
+        if not es_consulta_segura(sql_efectivo):
             return SECURITY_BLOCK_TEXT, None, None
-
-        if not valida_sql_whitelist(consulta_sql):
+        if not valida_sql_whitelist(sql_efectivo):
             return "🔒 La consulta hace referencia a objetos fuera de la tabla socios.", None, None
 
+        # 6) Ejecutar EXACTAMENTE el sql_efectivo
         with st.spinner("Ejecutando consulta segura..."):
             conn = sqlite3.connect("ecommerce.db")
-            cursor = conn.cursor()
-            cursor.execute(consulta_sql)
-            columnas = [desc[0] for desc in cursor.description]
-            filas = cursor.fetchall()
+            cur = conn.cursor()
+            cur.execute(sql_efectivo)
+            columnas = [d[0] for d in cur.description]
+            filas = cur.fetchall()
             conn.close()
 
-        actualizar_ultimo_socio(consulta_sql)
+        # Cinturón y tirantes: si por alguna razón regresaron más filas que el límite pedido, recortamos en cliente
+        if user_limit is not None and len(filas) > user_limit:
+            filas = filas[:user_limit]
+            modo += "+client_cap"
 
+        actualizar_ultimo_socio(sql_efectivo)
+
+        # 7) "resultado" solo para contexto del LLM (tomamos hasta 10 filas ya del EFECTIVO)
         try:
-            import pandas as pd
             preview_df = pd.DataFrame(filas[:10], columns=columnas)
-            resultado = preview_df.to_markdown(index=False)
+            resultado_ctx = preview_df.to_markdown(index=False)
         except Exception:
-            resultado = " | ".join(columnas) + "\n"
-            resultado += "\n".join([" | ".join(map(str, fila)) for fila in filas[:10]])
+            resultado_ctx = " | ".join(columnas) + "\n"
+            resultado_ctx += "\n".join([" | ".join(map(str, f)) for f in filas[:10]])
             if len(filas) > 10:
-                resultado += "\n..."
+                resultado_ctx += "\n..."
 
+        # 8) Redacción con el MISMO SQL EFECTIVO
         with st.spinner("Generando respuesta..."):
             respuesta = llm.invoke(prompt.format_prompt(
                 question=pregunta_usuario,
-                query=consulta_sql,
-                result=resultado,
+                query=sql_efectivo,
+                result=resultado_ctx,
                 cols=", ".join(get_campos_socios()[:25]) + ("…" if len(ALLOWED_COLS) > 25 else "")
             ).to_string())
 
         df = pd.DataFrame(filas, columns=columnas)
-        return respuesta.content, df, consulta_sql
+
+        # 9) DEBUG UI (opcional)
+        if debug:
+            with st.expander("🔧 Debug de consulta", expanded=False):
+                st.write("**Pregunta usuario:**", pregunta_usuario)
+                st.write("**Límite detectado:**", user_limit)
+                st.write("**SQL del modelo (raw):**")
+                st.code(str(sql_model_raw), language="sql")
+                st.write("**SQL sin límites (post-correcciones):**")
+                st.code(sql_sin_limits, language="sql")
+                st.write("**SQL EFECTIVO ejecutado:**")
+                st.code(sql_efectivo, language="sql")
+                st.write("**Modo de ejecución:**", modo)
+                st.write("**Filas retornadas:**", len(df))
+                st.dataframe(df.head(min(10, len(df))))
+
+        return respuesta.content, df, sql_efectivo
 
     except Exception as e:
         return f"⚠️ Error: {str(e)}", None, None
