@@ -12,9 +12,8 @@ st.set_page_config(
 )
 
 st.title("🤖 BOT PARA RESPONDER PREGUNTAS DE NEGOCIO SOBRE SOCIOS")
-st.write("")
 
-# Estilos generales
+# ===================== Estilos base =====================
 st.markdown("""
 <style>
 .chip-wrap{ max-width:900px; margin:6px 0 0 0; }
@@ -38,10 +37,113 @@ st.markdown("""
 .stButton>button:disabled{ opacity:.35; }
 
 .full-expander { margin-top:8px; }
+
+/* ===================== Mejoras SOLO para tema claro ===================== */
+@media (prefers-color-scheme: light) {
+  :root{
+    --bg:#ffffff;
+    --text:#1f2937;          /* gris 900 */
+    --muted:#4b5563;         /* gris 700 */
+    --border:#d0d7de;        /* borde suave */
+    --chip-bg:#f8fafc;       /* chip fondo */
+    --chip-hover:#eef2ff;    /* chip hover */
+    --input-bg:#f8fafc;      /* inputs */
+    --primary:#2563eb;
+  }
+
+  /* Colores generales */
+  body, [data-testid="stAppViewContainer"]{
+    background:var(--bg)!important; color:var(--text)!important;
+  }
+  a{ color:var(--primary)!important; }
+  [data-testid="stCaptionContainer"], small{ color:var(--muted)!important; }
+
+  /* Chips: contraste + pequeño aire vertical */
+  .chip{
+    background:var(--chip-bg)!important;
+    color:var(--text)!important;
+    border:1px solid var(--border)!important;
+    margin-top:2px; margin-bottom:2px;      /* aire entre filas */
+  }
+  .chip:hover{ background:var(--chip-hover)!important; }
+  .chip-row{ gap:10px 12px; row-gap:12px; } /* separación vertical adicional */
+
+  /* Inputs / selects / chat: solo color (sin tocar tamaños) */
+  [data-testid="stSelectbox"] div[role="combobox"],
+  [data-testid="stTextInput"] input,
+  [data-testid="stTextArea"] textarea,
+  [data-testid="stChatInput"] textarea{
+    background:var(--input-bg)!important;
+    color:var(--text)!important;
+    border:1px solid var(--border)!important;
+  }
+
+  /* Paginador: evita que se amontone el texto */
+  .pager-bar{ flex-wrap:wrap; gap:.25rem .5rem; color:var(--muted); }
+  .pager-bar .pager-info + .pager-info::before{
+    content:"·"; margin:0 .5rem; opacity:.6;
+  }
+}
 </style>
 """, unsafe_allow_html=True)
 
-# Render de campos paginados
+st.markdown("""
+<style>
+@media (prefers-color-scheme: light){
+
+  /* ===== Botones (flechas prev/next y demás) con mejor contraste ===== */
+  .stButton>button{
+    background:#ffffff !important;
+    color:#334155 !important;              /* slate-700 */
+    border:1px solid #cbd5e1 !important;   /* slate-300 */
+    box-shadow:0 1px 2px rgba(0,0,0,.04) !important;
+    font-weight:600 !important;            /* que la flecha se lea mejor */
+  }
+  .stButton>button:hover{
+    background:#eef2ff !important;         /* hover sutil */
+    border-color:#a8b3cf !important;
+  }
+  .stButton>button:disabled{
+    color:#94a3b8 !important;              /* slate-400 */
+    border-color:#e2e8f0 !important;
+    background:#f8fafc !important;
+    opacity:1 !important;                  /* evita que se desvanezcan demasiado */
+  }
+
+  /* ===== Chat input: eliminar "doble borde/sombra" ===== */
+  [data-testid="stChatInput"] > div{
+    background:#f8fafc !important;
+    border:1px solid #d0d7de !important;
+    box-shadow:none !important;            /* fuera el recuadro extra */
+  }
+  [data-testid="stChatInput"] textarea{
+    background:#f8fafc !important;
+    border:none !important;                /* el borde lo pone el contenedor */
+    box-shadow:none !important;
+    outline:none !important;
+  }
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
+@media (prefers-color-scheme: dark){
+  /* Chips: misma respiración vertical que en claro */
+  .chip-row{ gap:10px 12px; row-gap:12px; }   /* gap horizontal + vertical */
+  .chip{ margin-top:2px; margin-bottom:2px; } /* pelito de aire por chip   */
+  .chip-wrap{ margin-bottom:8px; }            /* separa chips del paginador */
+
+  /* Paginador: evita que se amontonen textos */
+  .pager-bar{ flex-wrap:wrap; gap:.25rem .5rem; }
+  .pager-bar .pager-info + .pager-info::before{
+    content:"·"; margin:0 .5rem; opacity:.6;
+  }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
     if not campos:
         st.info("No pude leer columnas de socios aún.")
@@ -102,7 +204,7 @@ def render_campos_paginado_15(campos: list[str], ss_key: str = "campos_socios"):
         st.markdown("\n".join([f'<span class="chip">{c}</span>' for c in visibles]), unsafe_allow_html=True)
         st.markdown('</div></div>', unsafe_allow_html=True)
 
-# Panel de campos y filtros
+# ===================== Panel de campos y filtros =====================
 with st.container():
     col1, col2 = st.columns([2, 1])
 
@@ -161,7 +263,7 @@ with st.container():
         sel_sucursal = st.session_state.sel_sucursal
         auto_inyectar = st.checkbox("Agregar estos filtros a mi pregunta", value=False)
 
-# Ejemplos de uso
+# ===================== Ejemplos de uso =====================
 st.markdown('<div class="full-expander">', unsafe_allow_html=True)
 with st.expander("💡 Ver ejemplos listos", expanded=False):
     ejemplos = [
@@ -176,7 +278,7 @@ with st.expander("💡 Ver ejemplos listos", expanded=False):
         st.markdown(f"- {ej}")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Conversación
+# ===================== Conversación =====================
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 
@@ -293,7 +395,6 @@ if prompt:
 
                 st.session_state.mensajes.append({"role": "assistant", "content": texto, "df": df})
 
-# Reinicio
 if st.button("🧹 Nueva conversación"):
     st.session_state.mensajes = []
     st.rerun()
